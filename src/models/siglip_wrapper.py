@@ -22,7 +22,10 @@ class SigLIPWrapper:
     def __init__(self, model_name="google/siglip-base-patch16-224", device=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         snapshot_dir = Path.home() / ".cache/huggingface/hub/models--google--siglip-base-patch16-224/snapshots/7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed"
-        target = str(snapshot_dir) if snapshot_dir.exists() else model_name
+        has_complete_snapshot = (snapshot_dir / "spiece.model").exists() and (
+            (snapshot_dir / "model.safetensors").exists() or (snapshot_dir / "pytorch_model.bin").exists()
+        )
+        target = str(snapshot_dir) if has_complete_snapshot else model_name
         self.processor = AutoProcessor.from_pretrained(target)
         self.model = AutoModel.from_pretrained(target).to(self.device)
         self.model.eval()

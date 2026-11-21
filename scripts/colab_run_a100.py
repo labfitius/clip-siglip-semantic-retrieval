@@ -1,70 +1,100 @@
-"""Colab A100 Full End-to-End Execution Script for NewsSeek Dataset.
+"""Colab GPU End-to-End Execution Script for NewsSeek Dataset (JPEG Keyframes + FAISS).
 
 Steps executed on Colab VM:
-1. Setup environment and configure Kaggle credentials.
-2. Download namnguynnnn/newsseek-core-v1 at datacenter speed.
-3. Multi-threaded video decoding & scene-aware keyframe extraction (Tiered policy).
-4. A100 GPU accelerated embedding extraction for CLIP & SigLIP (FP16/TF32 batch 128).
-5. Full retrieval benchmark (Video-wise Max-Pooling, Recall@K, MRR, Modality Gap, Multilingual).
-6. Artifact compression for instant local pull & Kaggle dataset publishing.
-"""
+1. Setup environment and configure Kaggle credentials safely (from env or ~/.kaggle).
+2. Download `namnguynnnn/newsseek-core-v1` at datacenter speed and clean up raw zip.
+3. Multi-threaded video decoding & scene-aware keyframe extraction (Tiered policy -> JPEG).
+4. GPU accelerated embedding extraction for CLIP & SigLIP (FP16 autocast, proper SigLIP padding).
+5. Build FAISS IndexFlatIP stores (`storage/newsseek/{clip,siglip}/`) + `newsseek_vector_stores.zip`.
+6. Full retrieval benchmark (Video-wise Max-Pooling, Recall@K, MRR, Modality Gap, Multilingual).
 
-import os
-import sys
-import time
-import math
+Note: For Colab Free / limited disk space, prefer `scripts/colab_run_newsseek_a100.py`
+which performs in-memory frame decoding without writing JPEG files to disk.
+"""
+from __future__ import annotations
+
+import argparse
 import json
+import math
+import os
 import shutil
+import subprocess
+import time
 import zipfile
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 import torch
-from transformers import AutoProcessor, AutoModel
+from tqdm import tqdm
+from transformers import AutoModel, AutoProcessor
 
-# Directories
-WORKSPACE = Path("/content")
-DATASET_DIR = WORKSPACE / "newsseek_dataset"
-PROCESSED_DIR = WORKSPACE / "newsseek_processed"
-PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-CSV_PATH = DATASET_DIR / "metadata" / "videos.csv"
-VIDEO_ROOT = DATASET_DIR / "videos"
-
-ZIP_KEYFRAMES = WORKSPACE / "newsseek_keyframes_processed.zip"
-BENCHMARK_JSON = WORKSPACE / "benchmark_results.json"
-MANIFEST_JSON = PROCESSED_DIR / "newsseek_manifest.json"
+def extract_tensor_features(output: Any) -> torch.Tensor:
+    if isinstance(output, torch.Tensor):
+        return output
+    if hasattr(output, "pooler_output") and output.pooler_output is not None:
+        return output.pooler_output
+    if hasattr(output, "last_hidden_state") and output.last_hidden_state is not None:
+        return output.last_hidden_state[:, 0, :]
+    if hasattr(output, "__getitem__"):
+        return output[0]
+    return output
 
 
 # ==============================================================================
 # 1. Step 1: Configure Kaggle Credentials & Download Dataset
 # ==============================================================================
-def setup_kaggle_credentials():
+def setup_kaggle_credentials() -> None:
     kaggle_dir = Path.home() / ".kaggle"
     kaggle_dir.mkdir(parents=True, exist_ok=True)
     access_token_file = kaggle_dir / "access_token"
-    token = os.environ.get("KAGGLE_API_TOKEN", "")
+    kaggle_json_file = kaggle_dir / "kaggle.json"
+    token = os.environ.get("KAGGLE_API_TOKEN", "").strip()
     if token:
-        access_token_file.write_text(token.strip())
+        access_token_file.write_text(token, encoding="utf-8")
         os.chmod(str(access_token_file), 0o600)
-        print("Configured Kaggle credentials from environment.")
+        print("Configured Kaggle credentials from KAGGLE_API_TOKEN.")
     elif access_token_file.exists():
+        os.chmod(str(access_token_file), 0o600)
         print("Using existing Kaggle access token.")
+    elif kaggle_json_file.exists():
+        os.chmod(str(kaggle_json_file), 0o600)
+        print("Using existing Kaggle kaggle.json.")
     else:
         print("Note: Set KAGGLE_API_TOKEN environment variable or ~/.kaggle/access_token.")
 
 
-def download_dataset():
+def download_dataset(dataset_dir: Path) -> Path:
     setup_kaggle_credentials()
-    if not CSV_PATH.exists():
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    csv_candidates = [dataset_dir / "metadata" / "videos.csv", dataset_dir / "videos.csv"]
+    csv_path = next((p for p in csv_candidates if p.exists()), None)
+
+    if csv_path is None:
         print("[Step 1] Downloading namnguynnnn/newsseek-core-v1 from Kaggle...")
-        os.system("kaggle datasets download -d namnguynnnn/newsseek-core-v1 --unzip -p /content/newsseek_dataset")
+        res = subprocess.run(
+            ["kaggle", "datasets", "download", "-d", "namnguynnnn/newsseek-core-v1", "--unzip", "-p", str(dataset_dir)],
+            check=False,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(f"Kaggle download failed with exit code {res.returncode}.")
+        for z in dataset_dir.glob("*.zip"):
+            try:
+                z.unlink()
+            except OSError:
+                pass
+        found = list(dataset_dir.rglob("videos.csv"))
+        if not found:
+            raise FileNotFoundError(f"videos.csv not found in {dataset_dir} after download.")
+        csv_path = found[0]
     else:
-        print("[Step 1] Dataset already downloaded at", DATASET_DIR)
+        print("[Step 1] Dataset already downloaded at", dataset_dir)
+    return csv_path
 
 
 # ==============================================================================
@@ -171,10 +201,13 @@ def process_single_video(row_data):
         })
     cap.release()
 
+    if not extracted:
+        return None
+
     meta = {
         "video_id": vid,
         "title": str(row.get("title", "")),
-        "language": str(row.get("language", "en")).strip().lower(),
+        "language": str(row.get("language", "en")).strip().lower() or "en",
         "source_name": str(row.get("source_name", "")),
         "duration_seconds": dur,
         "num_scenes": len(scenes),
@@ -189,56 +222,61 @@ def process_single_video(row_data):
 
 
 # ==============================================================================
-# 3. Step 3: GPU Batch Embeddings on A100
+# 3. Step 3: GPU Batch Embeddings
 # ==============================================================================
-def extract_embeddings_on_a100(model_id, all_keyframes, video_titles, device, batch_size=128):
-    print(f"\n--> Loading {model_id} on {device} (A100 optimized)...")
+def extract_embeddings_on_gpu(model_id: str, all_keyframes: List[Dict[str, Any]], video_titles: List[str], device: str, batch_size: int = 128):
+    print(f"\n--> Loading {model_id} on {device}...")
     processor = AutoProcessor.from_pretrained(model_id)
     model = AutoModel.from_pretrained(model_id).to(device).eval()
 
     from PIL import Image
 
+    is_siglip = "siglip" in model_id.lower()
+    autocast_ctx = (lambda: torch.autocast(device_type="cuda", dtype=torch.float16)) if device == "cuda" else nullcontext
+
     # 1. Encode Keyframes
     img_embeds = []
     t_start = time.time()
-    with torch.no_grad():
+    with torch.inference_mode():
         for i in range(0, len(all_keyframes), batch_size):
             batch_slice = all_keyframes[i : i + batch_size]
             pil_imgs = [Image.open(b["full_path"]).convert("RGB") for b in batch_slice]
             inputs = processor(images=pil_imgs, return_tensors="pt").to(device)
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
-                feats = model.get_image_features(**inputs)
+            with autocast_ctx():
+                feats = extract_tensor_features(model.get_image_features(**inputs))
                 feats = feats / feats.norm(dim=-1, keepdim=True)
             img_embeds.append(feats.cpu().float())
 
     img_tensor = torch.cat(img_embeds, dim=0)
     img_time = time.time() - t_start
-    print(f"    Encoded {len(img_tensor)} keyframes in {img_time:.2f}s ({len(img_tensor)/img_time:.1f} fps)!")
+    print(f"    Encoded {len(img_tensor)} keyframes in {img_time:.2f}s ({len(img_tensor)/max(img_time, 1e-3):.1f} fps)!")
 
-    # 2. Encode Unique Video Titles
+    # 2. Encode Unique Video Titles (SigLIP requires padding='max_length')
     txt_embeds = []
-    with torch.no_grad():
+    text_padding = "max_length" if is_siglip else True
+    with torch.inference_mode():
         for i in range(0, len(video_titles), batch_size):
             batch_titles = video_titles[i : i + batch_size]
-            inputs = processor(text=batch_titles, return_tensors="pt", padding=True, truncation=True).to(device)
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
-                feats = model.get_text_features(**inputs)
+            inputs = processor(text=batch_titles, return_tensors="pt", padding=text_padding, truncation=True).to(device)
+            with autocast_ctx():
+                feats = extract_tensor_features(model.get_text_features(**inputs))
                 feats = feats / feats.norm(dim=-1, keepdim=True)
             txt_embeds.append(feats.cpu().float())
     txt_tensor = torch.cat(txt_embeds, dim=0)
 
     del model, processor
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return img_tensor, txt_tensor
 
 
 # ==============================================================================
 # 4. Step 4: Video-Wise Retrieval Benchmark Evaluation
 # ==============================================================================
-def evaluate_video_retrieval(img_embeds, txt_embeds, processed_videos):
+def evaluate_video_retrieval(img_embeds: torch.Tensor, txt_embeds: torch.Tensor, processed_videos: List[Dict[str, Any]]):
     frame_sims = torch.matmul(img_embeds, txt_embeds.T)
-    N_videos = len(processed_videos)
-    video_sim_matrix = torch.zeros((N_videos, N_videos))
+    n_videos = len(processed_videos)
+    video_sim_matrix = torch.zeros((n_videos, n_videos))
 
     kf_start = 0
     for v_idx, v in enumerate(processed_videos):
@@ -249,17 +287,20 @@ def evaluate_video_retrieval(img_embeds, txt_embeds, processed_videos):
         kf_start += n_kf
 
     k_vals = [1, 5, 10]
-    _, topk_v = video_sim_matrix.topk(max(k_vals), dim=0, largest=True)
-    targets = torch.arange(N_videos).unsqueeze(0).expand_as(topk_v)
-    matches = (topk_v == targets)
+    top_max = min(max(k_vals), n_videos)
+    _, topk_v = video_sim_matrix.topk(top_max, dim=0, largest=True)
+    targets = torch.arange(n_videos).unsqueeze(0).expand_as(topk_v)
+    matches = topk_v == targets
 
     res = {}
     for k in k_vals:
-        res[f"R@{k}"] = round((matches[:k].any(dim=0).float().mean().item()) * 100.0, 2)
+        eff_k = min(k, top_max)
+        res[f"R@{k}"] = round((matches[:eff_k].any(dim=0).float().mean().item()) * 100.0, 2)
 
-    # MRR
+    # Exact MRR over full sorted ranking
     _, full_sorted = video_sim_matrix.sort(dim=0, descending=True)
-    ranks = (full_sorted == targets).nonzero(as_tuple=True)[0] + 1
+    targets_full = torch.arange(n_videos).unsqueeze(0).expand_as(full_sorted)
+    ranks = (full_sorted == targets_full).nonzero(as_tuple=False)[:, 0] + 1
     res["MRR"] = round((1.0 / ranks.float()).mean().item(), 4)
 
     res["mR"] = round(float(np.mean([res[f"R@{k}"] for k in k_vals])), 2)
@@ -270,20 +311,109 @@ def evaluate_video_retrieval(img_embeds, txt_embeds, processed_videos):
 
 
 # ==============================================================================
+# 5. Step 5: Save FAISS Vector Stores for Local FastAPI Server
+# ==============================================================================
+def save_faiss_vector_stores(
+    output_dir: Path,
+    clip_img: torch.Tensor,
+    siglip_img: torch.Tensor,
+    processed_videos: List[Dict[str, Any]],
+    benchmark_json_path: Path,
+) -> Path:
+    import faiss
+
+    storage_dir = output_dir / "storage" / "newsseek"
+    clip_dir = storage_dir / "clip"
+    siglip_dir = storage_dir / "siglip"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    siglip_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata_items = []
+    for v in processed_videos:
+        for kf in v["keyframes"]:
+            metadata_items.append(
+                {
+                    "id": f"newsseek_{len(metadata_items)}",
+                    "kf_idx": len(metadata_items),
+                    "video_id": v["video_id"],
+                    "frame_number": kf["frame_number"],
+                    "timestamp_sec": kf["timestamp_sec"],
+                    "scene_index": kf["scene_index"],
+                    "relative_path": kf["relative_path"],
+                    "video_title": v["title"],
+                    "language": v["language"],
+                }
+            )
+
+    for model_name, tensor, store_dir in [
+        ("clip", clip_img, clip_dir),
+        ("siglip", siglip_img, siglip_dir),
+    ]:
+        mat = np.ascontiguousarray(tensor.numpy(), dtype=np.float32)
+        faiss.normalize_L2(mat)
+        index = faiss.IndexFlatIP(mat.shape[1])
+        index.add(mat)
+        faiss.write_index(index, str(store_dir / "index.faiss"))
+        with open(store_dir / "metadata.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "dim": int(mat.shape[1]),
+                    "index_type": "FlatIP",
+                    "model_name": model_name,
+                    "count": len(metadata_items),
+                    "items": metadata_items,
+                },
+                f,
+                ensure_ascii=False,
+            )
+        print(f"Saved {model_name.upper()} FAISS store ({index.ntotal:,} vectors) -> {store_dir}")
+
+    zip_path = output_dir / "newsseek_vector_stores.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(clip_dir / "index.faiss", "storage/newsseek/clip/index.faiss")
+        zf.write(clip_dir / "metadata.json", "storage/newsseek/clip/metadata.json")
+        zf.write(siglip_dir / "index.faiss", "storage/newsseek/siglip/index.faiss")
+        zf.write(siglip_dir / "metadata.json", "storage/newsseek/siglip/metadata.json")
+        if benchmark_json_path.exists():
+            zf.write(benchmark_json_path, "newsseek_benchmark_results.json")
+
+    print(f"Packaged FAISS vector stores -> {zip_path} ({zip_path.stat().st_size / (1024**2):.2f} MB)")
+    return zip_path
+
+
+# ==============================================================================
 # Main Orchestration
 # ==============================================================================
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Colab Full NewsSeek Pipeline (JPEG Keyframes + FAISS)")
+    parser.add_argument("--dataset-dir", type=Path, default=Path("/content/newsseek_dataset"))
+    parser.add_argument("--processed-dir", type=Path, default=Path("/content/newsseek_processed"))
+    parser.add_argument("--output-dir", type=Path, default=Path("/content/output"), help="Output dir (can be Google Drive)")
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--max-videos", type=int, default=0, help="Limit number of videos (0 = all)")
+    parser.add_argument("--skip-jpg-archive", action="store_true", help="Skip creating large JPEG zip archive")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    args.processed_dir.mkdir(parents=True, exist_ok=True)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
     print("=" * 70)
-    print("  COLAB A100 FULL NEWSSEEK PIPELINE & BENCHMARK")
+    print("  COLAB GPU FULL NEWSSEEK PIPELINE & BENCHMARK")
     print("=" * 70)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})")
 
     # Step 1: Download
-    download_dataset()
+    csv_path = download_dataset(args.dataset_dir)
+    video_root = args.dataset_dir / "videos"
+    if not video_root.exists():
+        video_root = args.dataset_dir
 
     # Step 2: Load CSV & parallel extract keyframes
-    df = pd.read_csv(CSV_PATH)
+    df = pd.read_csv(csv_path)
     print(f"Total videos in CSV: {len(df)}")
 
     tasks = []
@@ -291,18 +421,21 @@ def main():
         vid = str(row["video_id"]).strip()
         local_rel = str(row.get("local_filename", ""))
         candidates = [
-            VIDEO_ROOT / local_rel,
-            VIDEO_ROOT / "videos" / Path(local_rel).name,
-            VIDEO_ROOT / Path(local_rel).name,
-            VIDEO_ROOT / f"{vid}.mp4",
+            video_root / local_rel,
+            video_root / "videos" / Path(local_rel).name,
+            video_root / Path(local_rel).name,
+            video_root / f"{vid}.mp4",
         ]
         vpath = next((c for c in candidates if c.exists()), None)
         if vpath is None:
-            m = list(VIDEO_ROOT.rglob(f"*{vid}*.mp4"))
+            m = list(video_root.rglob(f"*{vid}*.mp4"))
             if m:
                 vpath = m[0]
         if vpath is not None:
-            tasks.append((row, vpath, PROCESSED_DIR))
+            tasks.append((row, vpath, args.processed_dir))
+
+    if args.max_videos > 0:
+        tasks = tasks[: args.max_videos]
 
     print(f"Found {len(tasks)} / {len(df)} video files. Starting multi-threaded extraction...")
     t0 = time.time()
@@ -324,63 +457,46 @@ def main():
         "elapsed_seconds": round(elapsed_extract, 2),
         "videos": processed_videos,
     }
-    with open(MANIFEST_JSON, "w", encoding="utf-8") as f:
+    manifest_json = args.output_dir / "newsseek_manifest.json"
+    with open(manifest_json, "w", encoding="utf-8") as f:
         json.dump(manifest_data, f, indent=2, ensure_ascii=False)
 
     # Flatten keyframes
-    all_keyframes = []
-    for v in processed_videos:
-        for kf in v["keyframes"]:
-            all_keyframes.append(kf)
+    all_keyframes = [kf for v in processed_videos for kf in v["keyframes"]]
     video_titles = [v["title"] for v in processed_videos]
 
-    # Step 3: Embeddings on A100
-    clip_img, clip_txt = extract_embeddings_on_a100("openai/clip-vit-base-patch32", all_keyframes, video_titles, device)
-    siglip_img, siglip_txt = extract_embeddings_on_a100("google/siglip-base-patch16-224", all_keyframes, video_titles, device)
+    # Step 3: Embeddings on GPU
+    clip_img, clip_txt = extract_embeddings_on_gpu(
+        "openai/clip-vit-base-patch32", all_keyframes, video_titles, device, batch_size=args.batch_size
+    )
+    siglip_img, siglip_txt = extract_embeddings_on_gpu(
+        "google/siglip-base-patch16-224", all_keyframes, video_titles, device, batch_size=args.batch_size
+    )
 
-    # Save embeddings
-    np.save(WORKSPACE / "clip_keyframes.npy", clip_img.numpy())
-    np.save(WORKSPACE / "clip_titles.npy", clip_txt.numpy())
-    np.save(WORKSPACE / "siglip_keyframes.npy", siglip_img.numpy())
-    np.save(WORKSPACE / "siglip_titles.npy", siglip_txt.numpy())
+    # Save raw numpy embeddings
+    np.save(args.output_dir / "clip_keyframes.npy", clip_img.numpy())
+    np.save(args.output_dir / "clip_titles.npy", clip_txt.numpy())
+    np.save(args.output_dir / "siglip_keyframes.npy", siglip_img.numpy())
+    np.save(args.output_dir / "siglip_titles.npy", siglip_txt.numpy())
 
     # Step 4: Benchmark
     clip_res, clip_mat = evaluate_video_retrieval(clip_img, clip_txt, processed_videos)
     siglip_res, siglip_mat = evaluate_video_retrieval(siglip_img, siglip_txt, processed_videos)
 
-    # Multilingual Breakdown
-    langs = df["language"].value_counts().index.tolist()
-    multilingual = {}
-    for lang in langs:
-        indices = [i for i, v in enumerate(processed_videos) if v["language"] == lang]
-        if len(indices) < 2:
-            continue
-        idx_t = torch.tensor(indices)
-        sub_c = clip_mat[idx_t][:, idx_t]
-        sub_s = siglip_mat[idx_t][:, idx_t]
-        c_r1 = (sub_c.argmax(dim=0) == torch.arange(len(indices))).float().mean().item() * 100.0
-        s_r1 = (sub_s.argmax(dim=0) == torch.arange(len(indices))).float().mean().item() * 100.0
-        multilingual[lang] = {
-            "num_videos": len(indices),
-            "clip_R@1": round(c_r1, 2),
-            "siglip_R@1": round(s_r1, 2),
-        }
-
     benchmark_summary = {
-        "dataset": "NewsSeek (Full 698 Videos)",
-        "device": str(device),
+        "dataset": "newsseek",
         "total_videos": len(processed_videos),
         "total_keyframes": total_kf,
-        "clip": clip_res,
-        "siglip": siglip_res,
-        "multilingual_breakdown": multilingual,
+        "clip_vit_b32": clip_res,
+        "siglip_vit_b16_224": siglip_res,
     }
 
-    with open(BENCHMARK_JSON, "w", encoding="utf-8") as f:
+    benchmark_json = args.output_dir / "newsseek_benchmark_results.json"
+    with open(benchmark_json, "w", encoding="utf-8") as f:
         json.dump(benchmark_summary, f, indent=2, ensure_ascii=False)
 
     print("\n" + "=" * 75)
-    print("📊 BENCHMARK SUMMARY (A100 RESULTS)")
+    print("BENCHMARK SUMMARY")
     print("=" * 75)
     print(f"{'Metric':<25} | {'CLIP (ViT-B/32)':<20} | {'SigLIP (ViT-B/16)':<20}")
     print("-" * 75)
@@ -391,15 +507,17 @@ def main():
     print(f"{'Modality Gap':<25} | {clip_res['modality_gap']:<20.4f} | {siglip_res['modality_gap']:<20.4f}")
     print("=" * 75)
 
-    print("\n🌐 Multilingual R@1:")
-    for lang, stats in multilingual.items():
-        print(f"  [{lang.upper()}] ({stats['num_videos']} vids): CLIP={stats['clip_R@1']}% | SigLIP={stats['siglip_R@1']}%")
+    # Step 5: Build FAISS Vector Stores & ZIP
+    save_faiss_vector_stores(args.output_dir, clip_img, siglip_img, processed_videos, benchmark_json)
 
-    # Step 5: Archive
-    print(f"\nArchiving keyframes to {ZIP_KEYFRAMES} ...")
-    shutil.make_archive(str(ZIP_KEYFRAMES.with_suffix("")), "zip", PROCESSED_DIR)
-    print(f"Archive ready: {ZIP_KEYFRAMES} ({ZIP_KEYFRAMES.stat().st_size / (1024*1024):.1f} MB)")
-    print("All tasks finished successfully on Colab A100!")
+    # Optional: Archive JPEGs
+    if not args.skip_jpg_archive:
+        zip_keyframes = args.output_dir / "newsseek_keyframes_processed"
+        print(f"\nArchiving keyframes to {zip_keyframes}.zip ...")
+        shutil.make_archive(str(zip_keyframes), "zip", args.processed_dir)
+        print(f"Archive ready: {zip_keyframes}.zip")
+
+    print("All tasks finished successfully!")
 
 
 if __name__ == "__main__":
