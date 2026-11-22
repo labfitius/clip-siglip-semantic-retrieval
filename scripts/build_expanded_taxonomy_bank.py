@@ -65,7 +65,7 @@ EXPANDED_BANK = {
         {
             "id": "KIS_07",
             "theme": "Nhật thực Toàn phần & Lưới Điện",
-            "target_video_id": "E",
+            "target_video_id": "xBOG9k57w_E",
             "query_en": "Total solar eclipse corona in dark sky above high voltage electricity transmission pylons and solar power field",
             "query_vi": "Vành nhật hoa của nhật thực toàn phần trên bầu trời tối phía trên các cột điện cao thế và cánh đồng pin mặt trời",
             "discriminative_cues": "Solar eclipse corona, high voltage pylons, dark midday sky"
@@ -89,7 +89,7 @@ EXPANDED_BANK = {
         {
             "id": "KIS_10",
             "theme": "Thuyền Người Di cư Cập bến",
-            "target_video_id": "Trs049E",
+            "target_video_id": "Oe9_Trs049E",
             "query_en": "Overcrowded black rubber dinghy carrying migrants wearing orange life jackets being intercepted by border patrol cutter",
             "query_vi": "Xuồng cao su màu đen chở người di cư quá tải mặc áo phao cam bị tàu tuần tra biên giới tiếp cận",
             "discriminative_cues": "Inflatable black boat, orange life jackets, border force vessel"
@@ -130,7 +130,7 @@ EXPANDED_BANK = {
         {
             "id": "TEMP_02",
             "theme": "Cấp cứu Hồi sức -> Bệnh nhân Tỉnh táo",
-            "video_id_context": "8iZSkgqoI",
+            "video_id_context": "L_8iZSkgqoI",
             "steps_en": [
                 "Doctors and intensive care nurses monitoring patient with digital ECG heart rate displays",
                 "Patient sitting up talking with doctor holding medical clipboard in hospital ward"
@@ -172,7 +172,7 @@ EXPANDED_BANK = {
         {
             "id": "TEMP_05",
             "theme": "Hạn hán Cạn kiệt -> Cứu trợ Nước sạch",
-            "video_id_context": "w",
+            "video_id_context": "9ZcYkG3eD_w",
             "steps_en": [
                 "Cracked parched reservoir bed with dried mud and stranded wooden boats",
                 "Municipal water tanker truck pumping fresh water into plastic barrels for waiting residents"
@@ -240,7 +240,7 @@ EXPANDED_BANK = {
             "concept": "Hạn hán Nghiêm trọng & Thiếu Nước sạch",
             "query_en": "Parched cracked dry soil reservoirs and citizens carrying plastic water containers",
             "query_vi": "Hồ chứa nước khô cạn nứt nẻ và người dân mang can nhựa đi lấy nước",
-            "target_multi_videos": "o8L5ZXBBdjs, w, V6XAeLdeI"
+            "target_multi_videos": "o8L5ZXBBdjs, 9ZcYkG3eD_w, e_V6XAeLdeI"
         },
         {
             "id": "AVS_03",
@@ -268,14 +268,14 @@ EXPANDED_BANK = {
             "concept": "Tập kích Tên lửa & Phòng không Đô thị",
             "query_en": "Anti-aircraft air defense missiles launching at night sky and smoke over city skyline",
             "query_vi": "Tên lửa phòng không bắn lên bầu trời đêm và khói bốc lên trên đường chân trời thành phố",
-            "target_multi_videos": "OpXlGrKUPmo, 2lS7aGGw, DH5GqQwCY0A"
+            "target_multi_videos": "OpXlGrKUPmo, TE_2lS7aGGw, DH5GqQwCY0A"
         },
         {
             "id": "AVS_07",
             "concept": "Khủng hoảng Di cư Băng biển Địa Trung Hải",
             "query_en": "Migrants in life jackets arriving on sandy beach rescued by humanitarian volunteers",
             "query_vi": "Người di cư mặc áo phao lên bãi biển cát được tình nguyện viên nhân đạo hỗ trợ",
-            "target_multi_videos": "47EBP1i1XLc, Trs049E, AtDXBWMbJtI"
+            "target_multi_videos": "47EBP1i1XLc, Oe9_Trs049E, AtDXBWMbJtI"
         },
         {
             "id": "AVS_08",
@@ -289,7 +289,7 @@ EXPANDED_BANK = {
             "concept": "Phòng mổ & Thiết bị Y tế Kỹ thuật cao",
             "query_en": "Surgeons wearing sterile blue surgical scrubs performing operation under bright operating lights",
             "query_vi": "Các bác sĩ phẫu thuật mặc áo mổ màu xanh thực hiện ca phẫu thuật dưới ánh đèn phòng mổ",
-            "target_multi_videos": "8iZSkgqoI, mRcU6eSqRko, V6XAeLdeI"
+            "target_multi_videos": "L_8iZSkgqoI, mRcU6eSqRko, e_V6XAeLdeI"
         },
         {
             "id": "AVS_10",

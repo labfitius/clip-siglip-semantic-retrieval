@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import os
+import sys
 import json
 from typing import Any, List, Dict, Optional, Tuple, Union
 from pathlib import Path
 
+if sys.platform == "darwin":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import faiss
 import numpy as np
+
+if sys.platform == "darwin":
+    # Prevent OpenMP thread-pool clash between PyTorch and FAISS on macOS (SIGSEGV 139)
+    try:
+        faiss.omp_set_num_threads(1)
+    except Exception:
+        pass
 
 
 SUPPORTED_INDEX_TYPES: tuple[str, ...] = ("FlatIP", "FlatL2")

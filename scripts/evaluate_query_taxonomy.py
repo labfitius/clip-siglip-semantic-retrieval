@@ -148,8 +148,8 @@ def run_benchmark():
 
     results = {
         "metadata": {
-            "total_keyframes": 164874,
-            "total_videos": 698,
+            "total_keyframes": int(clip_store.count),
+            "total_videos": len({m.get("video_id") for m in clip_store.metadata if m.get("video_id")}),
             "clip_model": "ViT-B/32 (512D)",
             "siglip_model": "ViT-B/16-224 (768D)",
             "benchmark_time": time.strftime("%Y-%m-%d %H:%M:%S"),

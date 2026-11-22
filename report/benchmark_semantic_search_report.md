@@ -10,7 +10,7 @@ Báo cáo này lưu trữ và tổng hợp kết quả đối chuẩn (benchmark
 
 Thử nghiệm được thực hiện trên hai kho ngữ liệu đại diện cho hai bài toán truy xuất đa phương thức:
 1. **MS COCO Karpathy Test Split**: 5,000 ảnh tĩnh chuẩn hóa, 25,010 câu truy vấn chú thích đối xứng.
-2. **NewsSeek Multilingual Video Dataset**: 698 video thời sự đa ngôn ngữ, 164,874 khung hình tiêu biểu (keyframes) được trích xuất theo scene boundaries.
+2. **NewsSeek Multilingual Video Dataset**: 698 video thời sự đa ngôn ngữ, 164,476 khung hình tiêu biểu (keyframes) được trích xuất theo scene boundaries.
 
 ---
 
@@ -32,19 +32,20 @@ Thử nghiệm được thực hiện trên hai kho ngữ liệu đại diện c
 
 ---
 
-### 2.2. Đánh giá trên NewsSeek Benchmark (698 Videos / 164,874 Keyframes)
+### 2.2. Đánh giá trên NewsSeek Benchmark (698 Videos / 164,476 Keyframes)
 
 | Chỉ số Đánh giá | OpenAI CLIP (ViT-B/32) | Google SigLIP (ViT-B/16-224) | Chênh lệch (Delta) | Mô hình Vượt trội |
 | :--- | :--- | :--- | :--- | :--- |
-| **Recall@1 (Video Max-Pool)** | 1.86% | **2.29%** | +0.43% (+23.1% tương đối) | SigLIP |
-| **Recall@5 (Video Max-Pool)** | 6.88% | **7.74%** | +0.86% | SigLIP |
-| **Recall@10 (Video Max-Pool)** | 10.32% | **11.03%** | +0.71% | SigLIP |
-| **Mean Recall (mR)** | 6.35% | **7.02%** | +0.67% | SigLIP |
-| **Mean Reciprocal Rank (MRR)** | 0.0498 | **0.0548** | +0.0050 | SigLIP |
-| **Thông lượng mã hóa (Google Colab A100)**| 42.9 fps | 42.9 fps | Song song FP16 In-Memory | Đồng hạng |
-| **Tổng thời gian mã hóa (164,874 frames)**| 3,845.73 s (~64 phút) | 3,845.73 s (~64 phút) | Trích xuất song song | Đồng hạng |
-| **Modality Gap** | 0.8664 | 1.0835 | +0.2171 | CLIP |
-| **Độ trễ tìm kiếm FAISS IndexFlatIP (Local)**| 25.83 ms | **11.48 ms** | -14.35 ms | SigLIP |
+| **Recall@1 (Video Max-Pool)** | 38.40% | **40.54%** | +2.14% (+5.6% tương đối) | SigLIP |
+| **Recall@5 (Video Max-Pool)** | 63.47% | **64.61%** | +1.14% | SigLIP |
+| **Recall@10 (Video Max-Pool)** | **75.64%** | 73.78% | -1.86% | CLIP |
+| **Mean Recall (mR)** | 59.17% | **59.64%** | +0.47% | SigLIP |
+| **Mean Reciprocal Rank (MRR)** | 0.5009 | **0.5159** | +0.0150 | SigLIP |
+| **R@1 English (615 video)** | 39.19% | **42.28%** | +3.09% | SigLIP |
+| **R@1 Non-English (83 video)** | **32.53%** | 27.71% | -4.82% | CLIP |
+| **Thông lượng mã hóa (Colab GPU)** | 57.3 fps | 57.3 fps | Song song FP16 In-Memory | Đồng hạng |
+| **Tổng thời gian mã hóa (164,476 frames)** | 2,870.93 s (~47.8 phút) | 2,870.93 s (~47.8 phút) | Sequential grab + Prefetch | Đồng hạng |
+| **Modality Gap** | **0.8230** | 1.0622 | +0.2392 | CLIP |
 
 ---
 
@@ -56,11 +57,11 @@ Trên tập MS COCO, SigLIP đạt mức bứt phá áp đảo với +17.30% R@1
 * **Không gian biểu diễn 768D**: Chiều không gian nhúng lớn hơn (+256 chiều so với 512D của CLIP) giúp lưu trữ các thuộc tính thuộc về màu sắc, chất liệu và quan hệ không gian mà không bị nén mất thông tin.
 
 ### 3.2. Hiệu năng Truy xuất Video Tin tức Đa ngôn ngữ (NewsSeek)
-* Với các câu truy vấn tin tức dài hoặc đa ngôn ngữ (tiếng Việt, tiếng Tây Ban Nha, tiếng Trung), tokenizer SentencePiece 250k của SigLIP không bị hiện tượng cắt cụt chuỗi (Token Truncation). 
-* Chiến lược **Max-Pooling theo video** (lấy keyframe có điểm tương đồng cao nhất đại diện cho video) giúp cả hai mô hình lọc bỏ các khung hình nhiễu hoặc khung hình chuyển cảnh tối màu, đạt độ chính xác cao nhất ở mốc sự kiện chính.
-* SigLIP đạt Recall@1 cao hơn 23.1% về mặt tương đối so với CLIP trên tập 698 video thời sự.
+* **Dẫn đầu ở độ chính xác Top-1, Top-5 và MRR**: Trên toàn bộ 698 video (164,476 keyframes), SigLIP đạt **40.54% R@1** (+2.14% so với 38.40% của CLIP), **64.61% R@5** (+1.14%) và **0.5159 MRR** (so với 0.5009), đặc biệt nổi bật trên tập 615 video tiếng Anh (**42.28% vs 39.19%**).
+* **Phân tích hiện tượng R@10 và nhóm Non-EN (83 video)**: CLIP đạt R@10 cao hơn nhẹ (75.64% vs 73.78%) và R@1_NonEN đạt 32.53% so với 27.71% của SigLIP. Khảo sát metadata `videos.csv` cho thấy một tỷ lệ lớn video gắn nhãn `vi` (VTV24) và `ko` thực chất sử dụng tiêu đề dịch sang tiếng Anh, trong khi các tiêu đề `ja`/`zh` chứa nhiều tên riêng địa danh và ngày phát sóng đặc thù.
+* **Chiến lược Max-Pooling & Hiệu năng Streaming**: Lấy điểm tương đồng cực đại trên các keyframe theo từng cảnh giúp lọc nhiễu chuyển cảnh và tập trung vào khoảnh khắc sự kiện chính. Pipeline giải mã tuần tự (`cap.grab()`) kết hợp `ThreadPoolExecutor` prefetch rút ngắn tổng thời gian encode cả hai mô hình xuống **47.8 phút (57.3 fps)**.
 
 ---
 
 ## 4. Kết luận Thực nghiệm
-Kết quả thực nghiệm trên cả hai tập ngữ liệu chứng minh Google SigLIP vượt trội hơn OpenAI CLIP ở mọi thang đo độ chính xác truy xuất (Recall@K, MRR), đồng thời sở hữu tốc độ mã hóa hình ảnh trên GPU nhanh hơn đáng kể.
+Kết quả thực nghiệm trên cả hai tập ngữ liệu khẳng định Google SigLIP vượt trội hơn OpenAI CLIP về chất lượng xếp hạng đỉnh (R@1, R@5, MRR, mR) trên cả ảnh tĩnh chuẩn tắc (MS COCO: +17.30% R@1) lẫn tập video thời sự thực tế (NewsSeek: +2.14% R@1, +0.0150 MRR), trong khi CLIP giữ được khoảng cách Modality Gap hẹp hơn và độ phủ R@10 cạnh tranh trên video tin tức.

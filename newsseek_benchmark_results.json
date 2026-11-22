@@ -1,27 +1,29 @@
 {
   "dataset": "newsseek",
   "total_videos": 698,
-  "total_keyframes": 164874,
+  "total_keyframes": 164476,
   "clip_vit_b32": {
-    "R@1": 1.86,
-    "R@5": 6.88,
-    "R@10": 10.32,
-    "MRR": 0.0498,
-    "mR": 6.35,
-    "modality_gap": 0.8664,
-    "R@1_EN": 1.86,
-    "kf_enc_time_sec": 3845.73,
-    "throughput_fps": 42.9
+    "R@1": 38.4,
+    "R@5": 63.47,
+    "R@10": 75.64,
+    "MRR": 0.5009,
+    "mR": 59.17,
+    "modality_gap": 0.823,
+    "R@1_EN": 39.19,
+    "R@1_NonEN": 32.53,
+    "kf_enc_time_sec": 2870.93,
+    "throughput_fps": 57.3
   },
   "siglip_vit_b16_224": {
-    "R@1": 2.29,
-    "R@5": 7.74,
-    "R@10": 11.03,
-    "MRR": 0.0548,
-    "mR": 7.02,
-    "modality_gap": 1.0835,
-    "R@1_EN": 2.29,
-    "kf_enc_time_sec": 3845.73,
-    "throughput_fps": 42.9
+    "R@1": 40.54,
+    "R@5": 64.61,
+    "R@10": 73.78,
+    "MRR": 0.5159,
+    "mR": 59.64,
+    "modality_gap": 1.0622,
+    "R@1_EN": 42.28,
+    "R@1_NonEN": 27.71,
+    "kf_enc_time_sec": 2870.93,
+    "throughput_fps": 57.3
   }
 }

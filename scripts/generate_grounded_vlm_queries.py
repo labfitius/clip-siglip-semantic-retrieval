@@ -85,7 +85,7 @@ GROUNDED_TAXONOMY_QUERIES = {
         {
             "id": "TEMP_02",
             "theme": "Hospital Emergency Care to Patient Recovery",
-            "video_id_context": "8iZSkgqoI",
+            "video_id_context": "L_8iZSkgqoI",
             "steps_en": [
                 "Doctors and intensive care nurses monitoring patient with digital ECG heart rate displays",
                 "Patient sitting up talking with doctor holding medical clipboard in hospital ward"
@@ -125,7 +125,7 @@ GROUNDED_TAXONOMY_QUERIES = {
             "concept": "Severe Drought and Freshwater Scarcity",
             "en": "Parched cracked dry soil reservoirs and citizens carrying plastic water containers",
             "vi": "Hồ chứa nước khô cạn nứt nẻ và người dân mang can nhựa đi lấy nước",
-            "target_multi_videos": "o8L5ZXBBdjs, w, V6XAeLdeI"
+            "target_multi_videos": "o8L5ZXBBdjs, 9ZcYkG3eD_w, e_V6XAeLdeI"
         },
         {
             "id": "AVS_03",
@@ -251,8 +251,8 @@ def run_experiment():
         output_report["adhoc_video_search"].append(item_eval)
         print(f"AVS {aq['id']} ({aq['concept']}): Top-30 Distinct Videos -> EN: CLIP={clip_vids_en}, SigLIP={siglip_vids_en} | VI: CLIP={clip_vids_vi}, SigLIP={siglip_vids_vi}")
 
-    # Save to JSON
-    out_path = ROOT_DIR / "storage" / "newsseek" / "vlm_grounded_queries_benchmark.json"
+    # Save to JSON (kept separate from UI's expanded 32-query bank vlm_grounded_queries_benchmark.json)
+    out_path = ROOT_DIR / "storage" / "newsseek" / "vlm_grounded_queries_eval.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output_report, f, indent=2, ensure_ascii=False)
     print(f"\n[Done] Saved grounded benchmark evaluation to: {out_path}")
