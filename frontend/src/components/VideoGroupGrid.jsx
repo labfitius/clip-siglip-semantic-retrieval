@@ -99,7 +99,7 @@ export default function VideoGroupGrid({
 
                 return (
                   <div
-                    key={kIdx}
+                    key={kf.id || `${kf.video_id}_${kf.frame_number}_${kIdx}`}
                     onClick={() => onInspect(kf)}
                     className="group relative flex-shrink-0 w-44 rounded border border-[#5c4d3a] bg-[#211a14] overflow-hidden cursor-pointer hover:border-[#f59e0b] transition-all"
                   >

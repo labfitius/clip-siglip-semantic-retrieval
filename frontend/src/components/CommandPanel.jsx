@@ -1,7 +1,7 @@
 import React from 'react';
 import { 
   Search, Sliders, Database, Layers, ArrowRight, RotateCcw, 
-  Sparkles, Image as ImageIcon, ChevronLeft, ChevronRight, HelpCircle, BarChart3
+  Sparkles, Image as ImageIcon, ChevronLeft, ChevronRight, HelpCircle, BarChart3, Globe
 } from 'lucide-react';
 import TaxonomyQuerySelector from './TaxonomyQuerySelector';
 
@@ -14,6 +14,10 @@ export default function CommandPanel({
   setStrategy,
   topK,
   setTopK,
+  autoTranslate = true,
+  setAutoTranslate,
+  dedupMode = 'video_max_pool',
+  setDedupMode,
   loading,
   onSearch,
   onImageSearch,
@@ -121,7 +125,7 @@ export default function CommandPanel({
                 }`}
               >
                 <div className="flex items-center justify-between w-full">
-                  <span className="font-mono font-bold">NewsSeek 166K</span>
+                  <span className="font-mono font-bold">NewsSeek 164K</span>
                   <span className="inline-block w-2 h-2 rounded-full bg-amber-500"></span>
                 </div>
                 <span className="text-[10px] text-[#a69580] mt-0.5">698 Video tin tức đa ngữ</span>
@@ -149,6 +153,25 @@ export default function CommandPanel({
           {/* Conditional Query Section: Only on NewsSeek dataset */}
           {dataset === 'newsseek' ? (
             <>
+              {/* Result Deduplication / Aggregation Mode */}
+              {typeof setDedupMode === 'function' && (
+                <div className="flex flex-col gap-1.5">
+                  <label className="flex items-center gap-1.5 text-xs font-bold font-mono text-[#a69580]">
+                    <Sliders size={13} className="text-emerald-400" />
+                    <span>RESULT DEDUPLICATION</span>
+                  </label>
+                  <select
+                    value={dedupMode}
+                    onChange={(e) => setDedupMode(e.target.value)}
+                    className="retro-input bg-[#211a14] border-2 border-[#5c4d3a] text-xs font-mono font-medium focus:border-[#f59e0b] text-[#ece1cd]"
+                  >
+                    <option value="video_max_pool">Video Max-Pooling (1 frame đỉnh / video — Chuẩn Benchmark)</option>
+                    <option value="temporal_nms">Temporal NMS (Lọc trùng cảnh ≥ 5s — KIS / Temporal)</option>
+                    <option value="none">Raw Keyframes (Không lọc — FAISS thuần)</option>
+                  </select>
+                </div>
+              )}
+
               {/* Semantic Query Input Box */}
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between">
@@ -170,7 +193,7 @@ export default function CommandPanel({
                         onSearch();
                       }
                     }}
-                    placeholder="Nhập câu mô tả tự nhiên (tiếng Anh hoặc tiếng Việt), ví dụ: 'kho vàng thỏi', 'xe cứu hỏa dập lửa'..."
+                    placeholder="Nhập câu mô tả tự nhiên (tiếng Việt hoặc tiếng Anh), ví dụ: 'người đi xe máy trên đường phố đông đúc', 'phà chở khách bốc cháy', 'lính cứu hỏa dập đám cháy rừng'..."
                     className="w-full rounded border-2 border-[#5c4d3a] bg-[#211a14] p-2.5 text-xs text-[#ece1cd] placeholder-[#6b5c4c] focus:border-[#ea580c] focus:outline-none resize-none font-sans"
                   />
                   {query && (
@@ -184,6 +207,27 @@ export default function CommandPanel({
                     </button>
                   )}
                 </div>
+
+                {/* Cross-Lingual VI -> EN Auto-Translate Toggle */}
+                {typeof setAutoTranslate === 'function' && (
+                  <label className="flex items-center justify-between gap-2 rounded border border-[#3d3228] bg-[#211a14] px-2.5 py-1.5 cursor-pointer hover:border-[#f59e0b] transition-colors">
+                    <div className="flex items-center gap-1.5 text-[11px] font-mono">
+                      <Globe size={12} className={autoTranslate ? 'text-emerald-400' : 'text-[#a69580]'} />
+                      <span className={autoTranslate ? 'text-[#ece1cd] font-bold' : 'text-[#a69580]'}>
+                        Tự động dịch VI → EN
+                      </span>
+                      <span className="text-[10px] text-[#a69580] hidden sm:inline">
+                        (khớp CLIP/SigLIP)
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={autoTranslate}
+                      onChange={(e) => setAutoTranslate(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-[#ea580c] cursor-pointer"
+                    />
+                  </label>
+                )}
               </div>
 
               {/* VLM Taxonomy Query Bank (KIS, Temporal, AVS) */}

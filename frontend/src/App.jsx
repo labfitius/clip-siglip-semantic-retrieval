@@ -9,10 +9,12 @@ import VideoModal from './components/VideoModal';
 import HelpModal from './components/HelpModal';
 
 export default function App() {
-  const [query, setQuery] = useState('kho vàng thỏi và nhân viên kiểm đếm');
+  const [query, setQuery] = useState('Người đi xe máy trên đường phố đông đúc');
   const [dataset, setDataset] = useState('newsseek');
   const [strategy, setStrategy] = useState('dual');
   const [topK, setTopK] = useState(12);
+  const [autoTranslate, setAutoTranslate] = useState(true);
+  const [dedupMode, setDedupMode] = useState('video_max_pool');
   const [viewMode, setViewMode] = useState('dual');
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -97,6 +99,8 @@ export default function App() {
           query: q,
           dataset: d,
           k: topK,
+          auto_translate: autoTranslate,
+          dedup_mode: dedupMode,
         }),
       });
       if (!res.ok) {
@@ -123,6 +127,7 @@ export default function App() {
     formData.append('file', file);
     formData.append('dataset', dataset);
     formData.append('k', topK);
+    formData.append('dedup_mode', dedupMode);
 
     try {
       const res = await fetch('/api/search-image', {
@@ -224,6 +229,10 @@ export default function App() {
           setStrategy={setStrategy}
           topK={topK}
           setTopK={setTopK}
+          autoTranslate={autoTranslate}
+          setAutoTranslate={setAutoTranslate}
+          dedupMode={dedupMode}
+          setDedupMode={setDedupMode}
           loading={loading}
           onSearch={handleSearch}
           onImageSearch={handleImageSearch}
@@ -239,6 +248,7 @@ export default function App() {
         <ResultGrid
           viewMode={viewMode}
           setViewMode={setViewMode}
+          strategy={strategy}
           results={results}
           loading={loading}
           benchmarkData={benchmarkData}

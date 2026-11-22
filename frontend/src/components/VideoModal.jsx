@@ -20,6 +20,10 @@ export default function VideoModal({
   const [triedYt, setTriedYt] = React.useState(false);
 
   useEffect(() => {
+    setTriedYt(false);
+  }, [item]);
+
+  useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') onClose();
     };
@@ -85,6 +89,11 @@ export default function VideoModal({
               {formatTimestamp(item.timestamp_sec)}
             </div>
           </div>
+          {triedYt && (
+            <p className="mt-2.5 text-[11px] text-center text-[#a69580] max-w-md">
+              Đang hiển thị ảnh bìa YouTube (keyframe gốc không lưu trên đĩa). Bấm <strong className="text-rose-300">Watch Video on YouTube</strong> để nhảy tới đúng khung hình tại <span className="font-mono text-[#f59e0b]">{formatTimestamp(item.timestamp_sec)}</span>.
+            </p>
+          )}
         </div>
 
         {/* Right: Technical Inspector Panel */}

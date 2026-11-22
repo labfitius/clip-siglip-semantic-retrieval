@@ -300,7 +300,7 @@ with st.sidebar:
 
     dataset_options = {
         "coco": "MS COCO Karpathy Test Split (5,000 images)",
-        "newsseek": "NewsSeek Video Keyframes (166k frames / 698 videos)",
+        "newsseek": "NewsSeek Video Keyframes (164,476 frames / 698 videos)",
     }
 
     selected_dataset = st.selectbox(
@@ -317,6 +317,22 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### ⚙️ Search Controls")
     top_k = st.slider("Top-K Retrieved Items", min_value=1, max_value=20, value=6, step=1)
+    auto_translate = st.checkbox(
+        "🌐 Tự động dịch VI → EN (khớp CLIP/SigLIP)",
+        value=True,
+        help="Tự động dịch truy vấn tiếng Việt/đa ngôn ngữ sang tiếng Anh trước khi encode bằng CLIP & SigLIP.",
+    )
+    dedup_labels = {
+        "video_max_pool": "Video Max-Pooling (1 frame đỉnh / video)",
+        "temporal_nms": "Temporal NMS (Lọc trùng cảnh ≥ 5s)",
+        "none": "Raw Keyframes (Không lọc — FAISS thuần)",
+    }
+    dedup_mode = st.selectbox(
+        "Chế độ lọc trùng kết quả",
+        options=list(dedup_labels.keys()),
+        format_func=lambda x: dedup_labels[x],
+        index=0,
+    )
 
     device_name = "NVIDIA CUDA (RTX 4060)" if ComparativeSearchEngine().device == "cuda" else "CPU"
     st.markdown(f"**Hardware Acceleration:** `{device_name}`")
@@ -354,11 +370,12 @@ with st.sidebar:
             "A commercial airplane taxiing on the airport runway",
         ],
         "newsseek": [
-            "Luigi Mangione state court trial hearing",
-            "Presidential press conference at the podium",
-            "Space launch rocket on the launchpad",
             "Người đi xe máy trên đường phố đông đúc",
-            "Wildfire smoke plumes over forest mountain",
+            "Phà chở khách bốc cháy nghi ngút khói đen trên biển",
+            "Đội cứu hộ đào bới đống đổ nát sau động đất",
+            "Họp báo tổng thống tại bục phát biểu có micro",
+            "Lính cứu hỏa phun nước dập đám cháy rừng",
+            "Phiên tòa xét xử Luigi Mangione",
         ],
     }
 
@@ -433,11 +450,23 @@ with tab_search:
         else:
             with st.spinner("Đang chạy embedding song song trên GPU và truy vấn FAISS..."):
                 if query_img is not None:
-                    results = engine.search_image(query_img, k=top_k)
+                    results = engine.search_image(query_img, k=top_k, dedup_mode=dedup_mode)
                 else:
-                    results = engine.search_text(query_input.strip(), k=top_k)
+                    results = engine.search_text(
+                        query_input.strip(),
+                        k=top_k,
+                        auto_translate=auto_translate,
+                        dedup_mode=dedup_mode,
+                    )
 
             if results:
+                trans = results.get("translation") or {}
+                if trans.get("applied"):
+                    st.info(
+                        f"🌐 **Auto-Translated ({trans.get('source_lang', 'vi').upper()} → EN | "
+                        f"`{trans.get('provider', 'nmt')}` • {trans.get('latency_ms', 0):.0f}ms):** "
+                        f"`{trans.get('translated_query', '')}`"
+                    )
                 # -------------------------------------------------------------
                 # Query-Level Comparative Telemetry Card
                 # -------------------------------------------------------------
@@ -641,6 +670,15 @@ with tab_benchmark:
     bm_data = load_benchmark_metrics(selected_dataset)
 
     if selected_dataset == "coco":
+        c = (bm_data or {}).get("clip_vit_b32", {})
+        s = (bm_data or {}).get("siglip_vit_b16_224", {})
+        r1_c, r1_s = float(c.get("T2I_R@1", 30.51)), float(s.get("T2I_R@1", 47.81))
+        r5_c, r5_s = float(c.get("T2I_R@5", 55.96)), float(s.get("T2I_R@5", 72.45))
+        r10_c, r10_s = float(c.get("T2I_R@10", 66.82)), float(s.get("T2I_R@10", 80.98))
+        mr_c, mr_s = float(c.get("T2I_mR", 51.10)), float(s.get("T2I_mR", 67.08))
+        mrr_c, mrr_s = float(c.get("T2I_MRR", 0.4262)), float(s.get("T2I_MRR", 0.5908))
+        gap_c, gap_s = float(c.get("modality_gap", 0.8269)), float(s.get("modality_gap", 1.0524))
+
         col_t1, col_t2 = st.columns([1.2, 1])
         with col_t1:
             st.markdown("#### 🎯 Text-to-Image (T2I) Benchmark — MS COCO Karpathy Test 5K")
@@ -656,32 +694,32 @@ with tab_benchmark:
                     "Số chiều đặc trưng (Dimension)",
                 ],
                 "CLIP (ViT-B/32)": [
-                    "37.80%",
-                    "62.40%",
-                    "72.10%",
-                    "57.43%",
-                    "0.4920",
-                    "0.7842",
+                    f"{r1_c:.2f}%",
+                    f"{r5_c:.2f}%",
+                    f"{r10_c:.2f}%",
+                    f"{mr_c:.2f}%",
+                    f"{mrr_c:.4f}",
+                    f"{gap_c:.4f}",
                     "32x32 (49 patches)",
                     "512D Float32",
                 ],
                 "SigLIP (ViT-B/16)": [
-                    "44.20%",
-                    "70.10%",
-                    "79.80%",
-                    "64.70%",
-                    "0.5610",
-                    "0.4125",
+                    f"{r1_s:.2f}%",
+                    f"{r5_s:.2f}%",
+                    f"{r10_s:.2f}%",
+                    f"{mr_s:.2f}%",
+                    f"{mrr_s:.4f}",
+                    f"{gap_s:.4f}",
                     "16x16 (196 patches)",
                     "768D Float32",
                 ],
                 "Độ chênh lệch (Δ)": [
-                    "🟢 +6.40%",
-                    "🟢 +7.70%",
-                    "🟢 +7.70%",
-                    "🟢 +7.27%",
-                    "🟢 +0.0690",
-                    "🟢 -47.4% (Gần hơn)",
+                    f"{'+' if r1_s >= r1_c else ''}{r1_s - r1_c:.2f}%",
+                    f"{'+' if r5_s >= r5_c else ''}{r5_s - r5_c:.2f}%",
+                    f"{'+' if r10_s >= r10_c else ''}{r10_s - r10_c:.2f}%",
+                    f"{'+' if mr_s >= mr_c else ''}{mr_s - mr_c:.2f}%",
+                    f"{'+' if mrr_s >= mrr_c else ''}{mrr_s - mrr_c:.4f}",
+                    f"{'+' if gap_s >= gap_c else ''}{gap_s - gap_c:.4f}",
                     "Finer Grid (4x tokens)",
                     "+256 Dimensions",
                 ],
@@ -691,67 +729,84 @@ with tab_benchmark:
         with col_t2:
             st.markdown("#### 💡 Phân tích Bản chất Kiến trúc Toán học")
             st.markdown(
-                """
-                - **Khắc phục Semantic Collision:** CLIP sử dụng **InfoNCE Softmax Loss**, giả định rằng trong một mini-batch chỉ có duy nhất 1 cặp dương tính (positive pair) và tất cả mẫu còn lại đều là âm tính (negatives). Tuy nhiên, kết quả EDA trên COCO chứng minh: khi kích thước batch $B \\ge 32$, xác suất xảy ra xung đột ngữ nghĩa (2 ảnh cùng chứa 'person' hoặc 'dog') là **100%**, gây hiện tượng gradient interference. SigLIP giải quyết triệt để vấn đề này bằng **Pairwise Sigmoid Loss**, đối xử độc lập từng cặp $(ảnh, chữ)$ như một bài toán nhị phân mà không có mẫu số chuẩn hóa toàn cục.
-                - **Độ thu hẹp Modality Gap:** Khoảng cách Euclidean giữa tâm cụm vector ảnh và tâm cụm vector chữ của SigLIP nhỏ hơn **47.4%** ($0.4125$ so với $0.7842$ của CLIP), chứng minh không gian biểu diễn đa phương thức của SigLIP hội tụ chặt chẽ hơn nhiều.
+                f"""
+                - **Khắc phục Semantic Collision:** CLIP sử dụng **InfoNCE Softmax Loss**, giả định rằng trong một mini-batch chỉ có duy nhất 1 cặp dương tính. SigLIP thay thế bằng **Pairwise Sigmoid Loss** độc lập từng cặp, giúp R@1 trên MS COCO Test 5K bứt phá lên **{r1_s:.2f}%** (so với **{r1_c:.2f}%** của CLIP, chênh lệch **+{r1_s - r1_c:.2f}%**).
+                - **Độ phân giải Patch 16x16 & Modality Gap:** SigLIP tạo 196 visual tokens (gấp 4 lần 49 tokens của CLIP ViT-B/32) trong không gian 768D. Dù Modality Gap của CLIP hẹp hơn ({gap_c:.4f} so với {gap_s:.4f}), không gian phân tách của SigLIP giúp MRR đạt **{mrr_s:.4f}** (so với {mrr_c:.4f}).
                 """
             )
 
     else:
+        c = (bm_data or {}).get("clip_vit_b32", {})
+        s = (bm_data or {}).get("siglip_vit_b16_224", {})
+        total_vids = int((bm_data or {}).get("total_videos", 698))
+        total_kf = int((bm_data or {}).get("total_keyframes", 164476))
+        r1_c, r1_s = float(c.get("R@1", 38.40)), float(s.get("R@1", 40.54))
+        r5_c, r5_s = float(c.get("R@5", 63.47)), float(s.get("R@5", 64.61))
+        r10_c, r10_s = float(c.get("R@10", 75.64)), float(s.get("R@10", 73.78))
+        mr_c, mr_s = float(c.get("mR", 59.17)), float(s.get("mR", 59.64))
+        mrr_c, mrr_s = float(c.get("MRR", 0.5009)), float(s.get("MRR", 0.5159))
+        r1_en_c, r1_en_s = float(c.get("R@1_EN", 39.19)), float(s.get("R@1_EN", 42.28))
+        r1_ne_c, r1_ne_s = float(c.get("R@1_NonEN", 32.53)), float(s.get("R@1_NonEN", 27.71))
+        gap_c, gap_s = float(c.get("modality_gap", 0.8230)), float(s.get("modality_gap", 1.0622))
+
         col_t1, col_t2 = st.columns([1.2, 1])
         with col_t1:
-            st.markdown("#### 🎥 Video Keyframe Retrieval Benchmark — NewsSeek (698 Videos / 166K Frames)")
+            st.markdown(f"#### 🎥 Video Keyframe Retrieval Benchmark — NewsSeek ({total_vids:,} Videos / {total_kf:,} Frames)")
             newsseek_metrics_table = {
                 "Chỉ số Đánh giá (Metrics)": [
                     "Recall@1 (Toàn bộ) ↑",
                     "Recall@5 (Toàn bộ) ↑",
                     "Recall@10 (Toàn bộ) ↑",
+                    "Mean Recall (mR) ↑",
                     "Mean Reciprocal Rank (MRR) ↑",
                     "R@1 Tiếng Anh (English) ↑",
-                    "R@1 Đa ngôn ngữ (VI, JA, ES) ↑",
+                    "R@1 Phi Tiếng Anh (Non-EN) ↑",
                     "Modality Gap (Khoảng cách Vector) ↓",
                     "Chiến lược Gộp Frame (Pooling)",
                 ],
                 "CLIP (ViT-B/32)": [
-                    "41.20%",
-                    "68.50%",
-                    "77.40%",
-                    "0.5280",
-                    "44.80%",
-                    "28.50%",
-                    "0.7210",
+                    f"{r1_c:.2f}%",
+                    f"{r5_c:.2f}%",
+                    f"{r10_c:.2f}%",
+                    f"{mr_c:.2f}%",
+                    f"{mrr_c:.4f}",
+                    f"{r1_en_c:.2f}%",
+                    f"{r1_ne_c:.2f}%",
+                    f"{gap_c:.4f}",
                     "Max-Pooling (Keyframes)",
                 ],
                 "SigLIP (ViT-B/16)": [
-                    "52.80%",
-                    "78.20%",
-                    "85.60%",
-                    "0.6410",
-                    "54.10%",
-                    "47.20%",
-                    "0.3890",
+                    f"{r1_s:.2f}%",
+                    f"{r5_s:.2f}%",
+                    f"{r10_s:.2f}%",
+                    f"{mr_s:.2f}%",
+                    f"{mrr_s:.4f}",
+                    f"{r1_en_s:.2f}%",
+                    f"{r1_ne_s:.2f}%",
+                    f"{gap_s:.4f}",
                     "Max-Pooling (Keyframes)",
                 ],
                 "Độ chênh lệch (Δ)": [
-                    "🟢 +11.60%",
-                    "🟢 +9.70%",
-                    "🟢 +8.20%",
-                    "🟢 +0.1130",
-                    "🟢 +9.30%",
-                    "🚀 +18.70% (Vượt trội)",
-                    "🟢 -46.0% (Gần hơn)",
+                    f"{'+' if r1_s >= r1_c else ''}{r1_s - r1_c:.2f}%",
+                    f"{'+' if r5_s >= r5_c else ''}{r5_s - r5_c:.2f}%",
+                    f"{'+' if r10_s >= r10_c else ''}{r10_s - r10_c:.2f}%",
+                    f"{'+' if mr_s >= mr_c else ''}{mr_s - mr_c:.2f}%",
+                    f"{'+' if mrr_s >= mrr_c else ''}{mrr_s - mrr_c:.4f}",
+                    f"{'+' if r1_en_s >= r1_en_c else ''}{r1_en_s - r1_en_c:.2f}%",
+                    f"{'+' if r1_ne_s >= r1_ne_c else ''}{r1_ne_s - r1_ne_c:.2f}%",
+                    f"{'+' if gap_s >= gap_c else ''}{gap_s - gap_c:.4f}",
                     "Salient Event Peak",
                 ],
             }
             st.table(newsseek_metrics_table)
 
         with col_t2:
-            st.markdown("#### 🌐 Ưu thế Đa ngôn ngữ & Lấy mẫu Cảnh (Scene Sampling)")
+            st.markdown("#### 🌐 Phân tích Thực nghiệm trên Tập Video Thời sự Đa ngôn ngữ")
             st.markdown(
-                r"""
-                - **Vấn đề Token Truncation:** Tokenizer BPE của CLIP được huấn luyện chủ yếu trên văn bản tiếng Anh với ngữ cảnh tối đa 77 tokens. Phân tích EDA cho thấy các tiêu đề tiếng Việt và tiếng Nhật dài tới 92 tokens, dẫn đến việc bị cắt cụt (truncation) mất ngữ cảnh quan trọng. Ngược lại, SigLIP sử dụng **SentencePiece Tokenizer (WebLI)** hỗ trợ hơn 100 ngôn ngữ, bảo toàn 100% ngữ nghĩa truy vấn.
-                - **Độ chính xác Đa ngôn ngữ bứt phá:** Trên tập các truy vấn không phải tiếng Anh, SigLIP đạt R@1 tới **47.20%**, vượt xa con số **28.50%** của CLIP (+18.70%).
-                - **Hiệu quả Max-Pooling:** Phép toán $\max_{f \in \mathcal{K}(v)} \cos(f, q)$ giúp trích xuất đúng khung hình mang tính nhận diện sự kiện cao nhất mà không bị pha loãng bởi độ dài video.
+                f"""
+                - **Ưu thế Top-1 & Xếp hạng của SigLIP:** Trên toàn bộ **{total_vids:,} video ({total_kf:,} keyframes)**, SigLIP vượt trội CLIP ở R@1 (**{r1_s:.2f}%** vs **{r1_c:.2f}%**), R@5 (**{r5_s:.2f}%** vs **{r5_c:.2f}%**), MRR (**{mrr_s:.4f}** vs **{mrr_c:.4f}**) và đặc biệt trên nhóm 615 video tiếng Anh (**{r1_en_s:.2f}%** vs **{r1_en_c:.2f}%**).
+                - **Đặc thù nhóm Non-EN (83 video) & R@10:** CLIP đạt R@10 (**{r10_c:.2f}%** vs **{r10_s:.2f}%**) và R@1_NonEN (**{r1_ne_c:.2f}%** vs **{r1_ne_s:.2f}%**) cao hơn nhẹ do nhiều video `vi`/`ko` trong metadata dùng tiêu đề tiếng Anh (VD: VTV24) còn nhóm `ja`/`zh` chứa nhiều tên riêng địa danh và ngày phát sóng.
+                - **Hiệu quả Max-Pooling:** Phép toán $\\max_{{f \\in \\mathcal{{K}}(v)}} \\cos(f, q)$ giúp trích xuất đúng khung hình mang tính nhận diện sự kiện cao nhất mà không bị pha loãng bởi độ dài video.
                 """
             )
 

@@ -27,7 +27,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.storage.vector_store import VectorStore, DualModelVectorStore
-from src.video_pipeline.comparative_search import ComparativeSearchEngine
+from src.video_pipeline.comparative_search import ComparativeSearchEngine, SUPPORTED_DEDUP_MODES
 
 app = FastAPI(
     title="Dual-Model Semantic Retrieval API",
@@ -101,7 +101,10 @@ class SearchRequest(BaseModel):
     query: str
     dataset: str = "coco"
     k: int = 10
-    filter_duplicates: bool = False
+    filter_duplicates: Optional[bool] = None
+    dedup_mode: Optional[str] = None
+    min_time_gap_sec: float = 5.0
+    auto_translate: bool = True
 
 
 @app.get("/api/status")
@@ -110,9 +113,15 @@ def get_status() -> Dict[str, Any]:
     coco_store = get_dataset_stores("coco")
     newsseek_store = get_dataset_stores("newsseek")
 
+    ns_frames = (
+        newsseek_store.clip.count
+        if newsseek_store and newsseek_store.clip
+        else (newsseek_store.siglip.count if newsseek_store and newsseek_store.siglip else 164476)
+    )
+
     return {
         "device": search_engine.device,
-        "device_name": "NVIDIA RTX 4060 CUDA" if search_engine.device == "cuda" else "CPU",
+        "device_name": "CUDA GPU" if search_engine.device == "cuda" else "CPU",
         "datasets": {
             "coco": {
                 "name": "MS COCO Karpathy Test 5K",
@@ -121,7 +130,7 @@ def get_status() -> Dict[str, Any]:
                 "siglip_vectors": coco_store.siglip.count if coco_store and coco_store.siglip else 0,
             },
             "newsseek": {
-                "name": "NewsSeek Video Keyframes (698 Videos / 164,874 Frames)",
+                "name": f"NewsSeek Video Keyframes (698 Videos / {ns_frames:,} Frames)",
                 "ready": newsseek_store is not None and (newsseek_store.clip is not None or newsseek_store.siglip is not None),
                 "clip_vectors": newsseek_store.clip.count if newsseek_store and newsseek_store.clip else 0,
                 "siglip_vectors": newsseek_store.siglip.count if newsseek_store and newsseek_store.siglip else 0,
@@ -150,13 +159,15 @@ def get_datasets() -> Dict[str, Any]:
             {
                 "id": "newsseek",
                 "name": "NewsSeek Video Keyframes",
-                "description": "166,241 keyframes trích xuất theo scene từ 698 video tin tức thời sự đa ngôn ngữ",
+                "description": "164,476 keyframes trích xuất theo scene từ 698 video tin tức thời sự đa ngôn ngữ",
                 "presets": [
-                    "Luigi Mangione state court trial hearing",
-                    "Presidential press conference at the podium",
-                    "Space launch rocket on the launchpad",
                     "Người đi xe máy trên đường phố đông đúc",
-                    "Wildfire smoke plumes over forest mountain",
+                    "Phà chở khách bốc cháy nghi ngút khói đen trên biển",
+                    "Đội cứu hộ đào bới đống đổ nát sau động đất",
+                    "Họp báo tổng thống tại bục phát biểu có micro",
+                    "Lính cứu hỏa phun nước dập đám cháy rừng",
+                    "Phiên tòa xét xử Luigi Mangione",
+                    "Tên lửa phóng lên không trung từ bệ phóng",
                 ],
             },
         ]
@@ -192,11 +203,27 @@ def search(req: SearchRequest) -> Dict[str, Any]:
             detail=f"Vector store for dataset '{req.dataset}' is still processing on Colab A100 GPU. Check /api/status.",
         )
 
+    resolved_dedup = req.dedup_mode
+    if resolved_dedup is None:
+        if req.filter_duplicates is True:
+            resolved_dedup = "temporal_nms"
+        elif req.filter_duplicates is False:
+            resolved_dedup = "none"
+        else:
+            resolved_dedup = "video_max_pool"
+    if resolved_dedup not in SUPPORTED_DEDUP_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid dedup_mode '{resolved_dedup}'. Supported: {list(SUPPORTED_DEDUP_MODES)}",
+        )
+
     search_engine.set_stores(store.clip, store.siglip)
     results = search_engine.search_text(
         query_text=q,
         k=req.k,
-        filter_duplicates=req.filter_duplicates,
+        min_time_gap_sec=req.min_time_gap_sec,
+        auto_translate=req.auto_translate,
+        dedup_mode=resolved_dedup,
     )
     results["dataset"] = req.dataset
     return results
@@ -207,8 +234,15 @@ async def search_image(
     file: UploadFile = File(...),
     dataset: str = Form("coco"),
     k: int = Form(6),
+    dedup_mode: str = Form("video_max_pool"),
 ) -> Dict[str, Any]:
     """Reverse image search across visual collections."""
+    if dedup_mode not in SUPPORTED_DEDUP_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid dedup_mode '{dedup_mode}'. Supported: {list(SUPPORTED_DEDUP_MODES)}",
+        )
+
     store = get_dataset_stores(dataset)
     if not store:
         raise HTTPException(status_code=503, detail=f"Vector store for '{dataset}' not ready.")
@@ -220,7 +254,7 @@ async def search_image(
         raise HTTPException(status_code=400, detail=f"Invalid image format: {e}")
 
     search_engine.set_stores(store.clip, store.siglip)
-    results = search_engine.search_image(pil_img, k=k)
+    results = search_engine.search_image(pil_img, k=k, dedup_mode=dedup_mode)
     results["dataset"] = dataset
     return results
 
@@ -318,44 +352,72 @@ def get_benchmark(dataset: str = "coco") -> Dict[str, Any]:
                     raw = json.load(f)
                 c = raw.get("clip_vit_b32", {})
                 s = raw.get("siglip_vit_b16_224", {})
-                r1_c = c.get("R@1", 1.86)
-                r1_s = s.get("R@1", 2.29)
-                r5_c = c.get("R@5", 6.88)
-                r5_s = s.get("R@5", 7.74)
-                r10_c = c.get("R@10", 10.32)
-                r10_s = s.get("R@10", 11.03)
-                mr_c = c.get("mR", 6.35)
-                mr_s = s.get("mR", 7.02)
-                mrr_c = c.get("MRR", 0.0498)
-                mrr_s = s.get("MRR", 0.0548)
-                gap_c = c.get("modality_gap", 0.8664)
-                gap_s = s.get("modality_gap", 1.0835)
-                fps = s.get("throughput_fps", 42.9)
-                total_kf = raw.get("total_keyframes", 164874)
-                total_vids = raw.get("total_videos", 698)
+                r1_c = float(c.get("R@1", 38.40))
+                r1_s = float(s.get("R@1", 40.54))
+                r5_c = float(c.get("R@5", 63.47))
+                r5_s = float(s.get("R@5", 64.61))
+                r10_c = float(c.get("R@10", 75.64))
+                r10_s = float(s.get("R@10", 73.78))
+                mr_c = float(c.get("mR", 59.17))
+                mr_s = float(s.get("mR", 59.64))
+                mrr_c = float(c.get("MRR", 0.5009))
+                mrr_s = float(s.get("MRR", 0.5159))
+                r1_en_c = c.get("R@1_EN")
+                r1_en_s = s.get("R@1_EN")
+                r1_nonen_c = c.get("R@1_NonEN")
+                r1_nonen_s = s.get("R@1_NonEN")
+                gap_c = float(c.get("modality_gap", 0.8230))
+                gap_s = float(s.get("modality_gap", 1.0622))
+                fps = float(s.get("throughput_fps", 57.3))
+                enc_sec = float(s.get("kf_enc_time_sec", 2870.93))
+                total_kf = int(raw.get("total_keyframes", 164476))
+                total_vids = int(raw.get("total_videos", 698))
+
+                def fmt_pct_delta(val_s: float, val_c: float) -> str:
+                    d = val_s - val_c
+                    return f"{'+' if d >= 0 else ''}{d:.2f}%"
+
+                def fmt_num_delta(val_s: float, val_c: float) -> str:
+                    d = val_s - val_c
+                    return f"{'+' if d >= 0 else ''}{d:.4f}"
+
+                r1_rel = ((r1_s - r1_c) / max(r1_c, 1e-6)) * 100.0
+                metrics = [
+                    {"name": "Recall@1 (Video Max-Pool) ↑", "clip": f"{r1_c:.2f}%", "siglip": f"{r1_s:.2f}%", "delta": f"{fmt_pct_delta(r1_s, r1_c)} ({'+' if r1_rel >= 0 else ''}{r1_rel:.1f}% Relative)", "winner": "siglip" if r1_s >= r1_c else "clip"},
+                    {"name": "Recall@5 (Video Max-Pool) ↑", "clip": f"{r5_c:.2f}%", "siglip": f"{r5_s:.2f}%", "delta": fmt_pct_delta(r5_s, r5_c), "winner": "siglip" if r5_s >= r5_c else "clip"},
+                    {"name": "Recall@10 (Video Max-Pool) ↑", "clip": f"{r10_c:.2f}%", "siglip": f"{r10_s:.2f}%", "delta": fmt_pct_delta(r10_s, r10_c), "winner": "siglip" if r10_s >= r10_c else "clip"},
+                    {"name": "Mean Recall (mR) ↑", "clip": f"{mr_c:.2f}%", "siglip": f"{mr_s:.2f}%", "delta": fmt_pct_delta(mr_s, mr_c), "winner": "siglip" if mr_s >= mr_c else "clip"},
+                    {"name": "Mean Reciprocal Rank (MRR) ↑", "clip": f"{mrr_c:.4f}", "siglip": f"{mrr_s:.4f}", "delta": fmt_num_delta(mrr_s, mrr_c), "winner": "siglip" if mrr_s >= mrr_c else "clip"},
+                ]
+                if r1_en_c is not None and r1_en_s is not None:
+                    metrics.append(
+                        {"name": "R@1 English (615 Videos) ↑", "clip": f"{float(r1_en_c):.2f}%", "siglip": f"{float(r1_en_s):.2f}%", "delta": fmt_pct_delta(float(r1_en_s), float(r1_en_c)), "winner": "siglip" if float(r1_en_s) >= float(r1_en_c) else "clip"}
+                    )
+                if r1_nonen_c is not None and r1_nonen_s is not None:
+                    metrics.append(
+                        {"name": "R@1 Non-English (83 Videos) ↑", "clip": f"{float(r1_nonen_c):.2f}%", "siglip": f"{float(r1_nonen_s):.2f}%", "delta": fmt_pct_delta(float(r1_nonen_s), float(r1_nonen_c)), "winner": "siglip" if float(r1_nonen_s) >= float(r1_nonen_c) else "clip"}
+                    )
+                metrics.extend(
+                    [
+                        {"name": "Encoding Throughput (Colab GPU) ↑", "clip": f"{fps:.1f} fps", "siglip": f"{fps:.1f} fps", "delta": f"{enc_sec/60:.1f} min (FP16 Streaming)", "winner": "tie"},
+                        {"name": "Modality Gap ↓", "clip": f"{gap_c:.4f}", "siglip": f"{gap_s:.4f}", "delta": fmt_num_delta(gap_s, gap_c), "winner": "clip" if gap_c < gap_s else "siglip"},
+                        {"name": "Patch Resolution Grid", "clip": "32x32 (49 patches)", "siglip": "16x16 (196 patches)", "delta": "4x Spatial Density", "winner": "siglip"},
+                        {"name": "Embedding Dimension", "clip": "512D Float32", "siglip": "768D Float32", "delta": "+256D Semantic Richness", "winner": "siglip"},
+                    ]
+                )
 
                 return {
                     "dataset": "newsseek",
                     "name": f"NewsSeek Multilingual Video Keyframes ({total_vids:,} Videos / {total_kf:,} Frames)",
-                    "metrics": [
-                        {"name": "Recall@1 (Video Max-Pool) ↑", "clip": f"{r1_c:.2f}%", "siglip": f"{r1_s:.2f}%", "delta": f"+{r1_s - r1_c:.2f}% (+23.1% Relative)", "winner": "siglip"},
-                        {"name": "Recall@5 (Video Max-Pool) ↑", "clip": f"{r5_c:.2f}%", "siglip": f"{r5_s:.2f}%", "delta": f"+{r5_s - r5_c:.2f}%", "winner": "siglip"},
-                        {"name": "Recall@10 (Video Max-Pool) ↑", "clip": f"{r10_c:.2f}%", "siglip": f"{r10_s:.2f}%", "delta": f"+{r10_s - r10_c:.2f}%", "winner": "siglip"},
-                        {"name": "Mean Recall (mR) ↑", "clip": f"{mr_c:.2f}%", "siglip": f"{mr_s:.2f}%", "delta": f"+{mr_s - mr_c:.2f}%", "winner": "siglip"},
-                        {"name": "Mean Reciprocal Rank (MRR) ↑", "clip": f"{mrr_c:.4f}", "siglip": f"{mrr_s:.4f}", "delta": f"+{mrr_s - mrr_c:.4f}", "winner": "siglip"},
-                        {"name": "Encoding Throughput (A100) ↑", "clip": f"{fps} fps", "siglip": f"{fps} fps", "delta": "Batched FP16 Autocast", "winner": "tie"},
-                        {"name": "Modality Gap", "clip": f"{gap_c:.4f}", "siglip": f"{gap_s:.4f}", "delta": f"{'+' if gap_s > gap_c else ''}{gap_s - gap_c:.4f}", "winner": "clip" if gap_c < gap_s else "siglip"},
-                        {"name": "Patch Resolution Grid", "clip": "32x32 (49 patches)", "siglip": "16x16 (196 patches)", "delta": "4x Spatial Density", "winner": "siglip"},
-                        {"name": "Embedding Dimension", "clip": "512D Float32", "siglip": "768D Float32", "delta": "+256D Semantic Richness", "winner": "siglip"},
-                    ],
+                    "metrics": metrics,
                     "insights": [
                         {
-                            "title": "Hiệu suất Vượt trội trên Toàn bộ 698 Video Tin tức",
-                            "content": f"SigLIP ViT-B/16 vượt trội hơn CLIP ViT-B/32 trên tất cả các ngưỡng Recall (R@1: 2.29% vs 1.86%, MRR: 0.0548 vs 0.0498) với chiến lược Max-Pooling trên toàn bộ 164,874 khung hình.",
+                            "title": f"SigLIP dẫn đầu độ chính xác Top-1 & Xếp hạng trên {total_vids:,} Video",
+                            "content": f"SigLIP ViT-B/16 đạt R@1 {r1_s:.2f}% (so với {r1_c:.2f}% của CLIP, {fmt_pct_delta(r1_s, r1_c)}), R@5 {r5_s:.2f}% vs {r5_c:.2f}%, và MRR {mrr_s:.4f} vs {mrr_c:.4f} với chiến lược Max-Pooling trên {total_kf:,} khung hình. Trong khi đó CLIP nhỉnh hơn nhẹ ở R@10 ({r10_c:.2f}% vs {r10_s:.2f}%).",
                         },
                         {
-                            "title": "Thông lượng Mã hóa A100 GPU: 42.9 fps",
-                            "content": "Toàn bộ 164,874 khung hình được xử lý song song trên Google Colab A100 với FP16 autocast và giải mã streaming trực tiếp từ bộ nhớ video mà không tốn chi phí I/O ghi đĩa.",
+                            "title": f"Thông lượng Mã hóa Streaming In-Memory: {fps:.1f} fps ({enc_sec/60:.1f} phút)",
+                            "content": f"Toàn bộ {total_kf:,} khung hình từ {total_vids:,} video được giải mã tuần tự (sequential grab + prefetch workers) và encode song song bằng FP16 autocast mà không tốn I/O ghi JPEG ra đĩa.",
                         },
                     ],
                 }
@@ -364,19 +426,19 @@ def get_benchmark(dataset: str = "coco") -> Dict[str, Any]:
 
         return {
             "dataset": "newsseek",
-            "name": "NewsSeek Multilingual Video Keyframes (698 Videos / 164,874 Frames)",
+            "name": "NewsSeek Multilingual Video Keyframes (698 Videos / 164,476 Frames)",
             "metrics": [
-                {"name": "Recall@1 (Video Max-Pool) ↑", "clip": "1.86%", "siglip": "2.29%", "delta": "+0.43%", "winner": "siglip"},
-                {"name": "Recall@5 (Video Max-Pool) ↑", "clip": "6.88%", "siglip": "7.74%", "delta": "+0.86%", "winner": "siglip"},
-                {"name": "Recall@10 (Video Max-Pool) ↑", "clip": "10.32%", "siglip": "11.03%", "delta": "+0.71%", "winner": "siglip"},
-                {"name": "MRR ↑", "clip": "0.0498", "siglip": "0.0548", "delta": "+0.0050", "winner": "siglip"},
-                {"name": "Modality Gap", "clip": "0.8664", "siglip": "1.0835", "delta": "+0.2171", "winner": "clip"},
+                {"name": "Recall@1 (Video Max-Pool) ↑", "clip": "38.40%", "siglip": "40.54%", "delta": "+2.14%", "winner": "siglip"},
+                {"name": "Recall@5 (Video Max-Pool) ↑", "clip": "63.47%", "siglip": "64.61%", "delta": "+1.14%", "winner": "siglip"},
+                {"name": "Recall@10 (Video Max-Pool) ↑", "clip": "75.64%", "siglip": "73.78%", "delta": "-1.86%", "winner": "clip"},
+                {"name": "MRR ↑", "clip": "0.5009", "siglip": "0.5159", "delta": "+0.0150", "winner": "siglip"},
+                {"name": "Modality Gap ↓", "clip": "0.8230", "siglip": "1.0622", "delta": "+0.2392", "winner": "clip"},
                 {"name": "Pooling Strategy", "clip": "Max-Pooling (Keyframes)", "siglip": "Max-Pooling (Keyframes)", "delta": "Salient Peak", "winner": "tie"},
             ],
             "insights": [
                 {
-                    "title": "SigLIP vượt trội trên video retrieval",
-                    "content": "SigLIP ViT-B/16-224 đạt Recall@1 cao hơn 23.1% so với CLIP ViT-B/32 trên tập 698 video thời sự NewsSeek.",
+                    "title": "SigLIP dẫn đầu R@1, R@5 và MRR trên 698 video NewsSeek",
+                    "content": "SigLIP ViT-B/16-224 đạt Recall@1 40.54% (so với 38.40% của CLIP ViT-B/32) và MRR 0.5159 (so với 0.5009) trên toàn bộ 164,476 keyframes.",
                 },
             ],
         }

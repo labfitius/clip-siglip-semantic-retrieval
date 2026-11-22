@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Eye, Clock, Film, Hash, ExternalLink } from 'lucide-react';
 
 function formatTimestamp(sec) {
@@ -9,9 +9,14 @@ function formatTimestamp(sec) {
   return `${min}:${s}`;
 }
 
-function getScoreBadgeClass(score) {
-  if (score >= 0.8) return 'border-teal-600 bg-teal-950/80 text-teal-400';
-  if (score >= 0.6) return 'border-amber-600 bg-amber-950/80 text-amber-400';
+function getScoreBadgeClass(score, modelName = 'clip') {
+  if (modelName === 'siglip') {
+    if (score >= 0.12) return 'border-teal-600 bg-teal-950/80 text-teal-400';
+    if (score >= 0.08) return 'border-amber-600 bg-amber-950/80 text-amber-400';
+    return 'border-rose-600 bg-rose-950/80 text-rose-400';
+  }
+  if (score >= 0.3) return 'border-teal-600 bg-teal-950/80 text-teal-400';
+  if (score >= 0.24) return 'border-amber-600 bg-amber-950/80 text-amber-400';
   return 'border-rose-600 bg-rose-950/80 text-rose-400';
 }
 
@@ -41,6 +46,12 @@ export default function ResultCard({
   } else if (!imageUrl && item.video_id) {
     imageUrl = `https://img.youtube.com/vi/${item.video_id}/hqdefault.jpg`;
   }
+
+  // Reset image fallback state whenever card represents a different frame/video
+  useEffect(() => {
+    setImgError(false);
+    setTriedYt(false);
+  }, [imageUrl, item.id, item.video_id, item.frame_number]);
 
   const handleImgError = (e) => {
     if (item.video_id && !triedYt) {
@@ -101,6 +112,13 @@ export default function ResultCard({
           </span>
         </div>
 
+        {/* Fallback Notice Badge when displaying YouTube cover instead of raw keyframe */}
+        {triedYt && !imgError && (
+          <div className="absolute bottom-1.5 left-1.5 z-10 rounded bg-black/80 border border-[#5c4d3a] px-1.5 py-0.5 font-mono text-[9px] text-[#f59e0b]">
+            YT Cover • Mở @ {formatTimestamp(item.timestamp_sec)}
+          </div>
+        )}
+
         {/* Quick Inspect Hover Overlay */}
         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5 text-xs font-bold text-white font-mono">
           <Eye size={16} />
@@ -130,12 +148,21 @@ export default function ResultCard({
                 {item.frame_number}
               </span>
             )}
+            {item.matched_frame_count > 1 && (
+              <span
+                className="rounded bg-[#2a221b] border border-[#5c4d3a] px-1 text-[9px] text-[#f59e0b]"
+                title={`Khung hình có điểm cao nhất trong ${item.matched_frame_count} khung hình khớp của video này`}
+              >
+                Peak/{item.matched_frame_count}f
+              </span>
+            )}
           </div>
 
           {/* Confidence Score Pill */}
           <div
             className={`flex items-center gap-1 rounded px-1.5 py-0.5 border text-[11px] font-bold ${getScoreBadgeClass(
-              score
+              score,
+              modelName
             )}`}
           >
             <span>{(score * 100).toFixed(1)}%</span>
