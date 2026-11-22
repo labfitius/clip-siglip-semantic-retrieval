@@ -30,6 +30,8 @@ import subprocess
 import sys
 import time
 import zipfile
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -137,6 +139,7 @@ def keyframe_count_tiered(duration_s: float) -> int:
 
 
 def detect_scenes_fast(cap: Any, fps: float, num_frames: int, threshold: float = 0.35) -> List[Tuple[int, int]]:
+    """Detects shot boundaries sequentially via cap.grab() to avoid expensive FFmpeg random seeks."""
     import cv2
 
     if num_frames <= 0:
@@ -147,26 +150,31 @@ def detect_scenes_fast(cap: Any, fps: float, num_frames: int, threshold: float =
     max_frames = int(25.0 * fps)
     scenes: List[Tuple[int, int]] = []
 
-    for f_idx in range(0, num_frames, step):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-        ret, frame = cap.read()
-        if not ret or frame is None:
+    f_idx = 0
+    while f_idx < num_frames:
+        if not cap.grab():
             break
-        small = cv2.resize(frame, (120, 68), interpolation=cv2.INTER_NEAREST)
-        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-        hist = cv2.calcHist([hsv], [0, 1], None, [24, 24], [0, 180, 0, 256])
-        cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+        if f_idx % step == 0:
+            ret, frame = cap.retrieve()
+            if not ret or frame is None:
+                break
+            small = cv2.resize(frame, (120, 68), interpolation=cv2.INTER_NEAREST)
+            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            hist = cv2.calcHist([hsv], [0, 1], None, [24, 24], [0, 180, 0, 256])
+            cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
 
-        if prev_hist is not None:
-            diff = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_BHATTACHARYYA)
-            if diff > threshold or (f_idx - scene_start) >= max_frames:
-                scenes.append((scene_start, f_idx - 1))
-                scene_start = f_idx
-        prev_hist = hist
+            if prev_hist is not None:
+                diff = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_BHATTACHARYYA)
+                if diff > threshold or (f_idx - scene_start) >= max_frames:
+                    scenes.append((scene_start, f_idx - 1))
+                    scene_start = f_idx
+            prev_hist = hist
+        f_idx += 1
 
-    if scene_start < num_frames:
-        scenes.append((scene_start, num_frames - 1))
-    return scenes if scenes else [(0, num_frames - 1)]
+    end_limit = f_idx if f_idx > 0 else num_frames
+    if scene_start < end_limit:
+        scenes.append((scene_start, end_limit - 1))
+    return scenes if scenes else [(0, max(0, end_limit - 1))]
 
 
 def select_keyframes_tiered(scenes: List[Tuple[int, int]], fps: float) -> List[Dict[str, Any]]:
@@ -243,14 +251,31 @@ def load_video_records(raw_videos_dir: Path, manifest_path: Optional[Path]) -> L
 
 def find_all_video_files(search_dir: Path, video_records: List[Dict[str, Any]]) -> Dict[str, Path]:
     all_mp4s = list(search_dir.rglob("*.mp4"))
-    vids = {v["video_id"] for v in video_records}
-    video_map: Dict[str, Path] = {}
+    by_rel: Dict[str, Path] = {}
+    by_name: Dict[str, Path] = {}
+    by_stem: Dict[str, Path] = {}
     for p in all_mp4s:
-        bname = p.name
-        video_map[p.stem] = p
-        for vid in vids:
-            if vid in bname:
-                video_map[vid] = p
+        by_name[p.name] = p
+        by_stem[p.stem] = p
+        try:
+            by_rel[p.relative_to(search_dir).as_posix()] = p
+        except ValueError:
+            pass
+
+    video_map: Dict[str, Path] = {}
+    for v in video_records:
+        vid = v["video_id"]
+        local_fn = str(v.get("local_filename", "")).strip()
+        if local_fn and local_fn in by_rel:
+            video_map[vid] = by_rel[local_fn]
+        elif local_fn and Path(local_fn).name in by_name:
+            video_map[vid] = by_name[Path(local_fn).name]
+        elif vid in by_stem:
+            video_map[vid] = by_stem[vid]
+        else:
+            matched = next((p for stem, p in by_stem.items() if stem.endswith(f"_{vid}") or vid in stem), None)
+            if matched is not None:
+                video_map[vid] = matched
     return video_map
 
 
@@ -282,12 +307,15 @@ def extract_video_frames_in_memory(
     sorted_kfs = sorted(keyframes, key=lambda x: x.get("frame_number", 0))
     extracted: List[Tuple[Dict[str, Any], Any]] = []
     current_frame = -1
+    # Sequential grab() is faster than cap.set() within typical GOP distances (~4s)
+    grab_threshold = max(60, int(fps * 4.0))
 
     for kf in sorted_kfs:
         target_f = int(kf.get("frame_number", 0))
-        if current_frame >= 0 and 0 <= target_f - current_frame < 15:
+        if current_frame >= 0 and 0 <= target_f - current_frame <= grab_threshold:
             while current_frame < target_f:
-                cap.grab()
+                if not cap.grab():
+                    break
                 current_frame += 1
         else:
             cap.set(cv2.CAP_PROP_POS_FRAMES, target_f)
@@ -314,6 +342,13 @@ def extract_video_frames_in_memory(
 # ==============================================================================
 # Step 3: Checkpointing & GPU Batch Inference
 # ==============================================================================
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
 def save_checkpoint(
     ckpt_dir: Path,
     clip_embeds_list: List[Any],
@@ -327,12 +362,20 @@ def save_checkpoint(
     clip_mat = np.concatenate(clip_embeds_list, axis=0).astype(np.float32) if clip_embeds_list else np.empty((0, 512), dtype=np.float32)
     siglip_mat = np.concatenate(siglip_embeds_list, axis=0).astype(np.float32) if siglip_embeds_list else np.empty((0, 768), dtype=np.float32)
 
-    np.save(ckpt_dir / "clip_embeds.npy", clip_mat)
-    np.save(ckpt_dir / "siglip_embeds.npy", siglip_mat)
-    with open(ckpt_dir / "metadata.json", "w", encoding="utf-8") as f:
-        json.dump(all_metadata, f, ensure_ascii=False)
-    with open(ckpt_dir / "processed_records.json", "w", encoding="utf-8") as f:
-        json.dump(processed_records, f, ensure_ascii=False)
+    clip_tmp = ckpt_dir / "clip_embeds.tmp.npy"
+    siglip_tmp = ckpt_dir / "siglip_embeds.tmp.npy"
+    np.save(clip_tmp, clip_mat)
+    np.save(siglip_tmp, siglip_mat)
+    os.replace(clip_tmp, ckpt_dir / "clip_embeds.npy")
+    os.replace(siglip_tmp, ckpt_dir / "siglip_embeds.npy")
+
+    _atomic_write_json(ckpt_dir / "metadata.json", all_metadata)
+    _atomic_write_json(ckpt_dir / "processed_records.json", processed_records)
+
+    # Compact in-memory chunk lists to avoid holding fragmented arrays
+    if len(clip_mat) > 0:
+        clip_embeds_list[:] = [clip_mat]
+        siglip_embeds_list[:] = [siglip_mat]
     print(f"    [Checkpoint] Saved {len(processed_records)} videos ({len(all_metadata)} frames) -> {ckpt_dir}")
 
 
@@ -364,6 +407,47 @@ def load_checkpoint(ckpt_dir: Path) -> Tuple[List[Any], List[Any], List[Dict[str
     return clip_list, siglip_list, all_metadata, processed_records
 
 
+def _iter_decoded_videos(
+    pending_records: List[Dict[str, Any]],
+    video_files_map: Dict[str, Path],
+    num_workers: int,
+):
+    """Yields (record, extracted_pairs, duration_sec, num_scenes) in order using bounded worker prefetch."""
+    if num_workers <= 1 or len(pending_records) <= 1:
+        for v in pending_records:
+            vpath = video_files_map[v["video_id"]]
+            raw_kfs = v.get("keyframes") or None
+            extracted_pairs, duration_sec, num_scenes = extract_video_frames_in_memory(vpath, raw_kfs)
+            yield v, extracted_pairs, duration_sec, num_scenes
+        return
+
+    max_prefetch = max(2, num_workers * 2)
+    it = iter(pending_records)
+    in_flight: deque = deque()
+
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        for _ in range(min(max_prefetch, len(pending_records))):
+            v = next(it)
+            fut = pool.submit(extract_video_frames_in_memory, video_files_map[v["video_id"]], v.get("keyframes") or None)
+            in_flight.append((v, fut))
+
+        while in_flight:
+            v, fut = in_flight.popleft()
+            try:
+                next_v = next(it)
+                next_fut = pool.submit(
+                    extract_video_frames_in_memory,
+                    video_files_map[next_v["video_id"]],
+                    next_v.get("keyframes") or None,
+                )
+                in_flight.append((next_v, next_fut))
+            except StopIteration:
+                pass
+
+            extracted_pairs, duration_sec, num_scenes = fut.result()
+            yield v, extracted_pairs, duration_sec, num_scenes
+
+
 def run_streaming_encoding(
     raw_videos_dir: Path,
     output_dir: Path,
@@ -372,6 +456,7 @@ def run_streaming_encoding(
     max_videos: int = 0,
     checkpoint_every: int = 50,
     resume: bool = True,
+    num_workers: int = 4,
 ):
     import numpy as np
     import torch
@@ -411,26 +496,27 @@ def run_streaming_encoding(
         clip_embeds_list, siglip_embeds_list, all_metadata, processed_records = [], [], [], []
 
     done_vids = {r["video_id"] for r in processed_records}
+    pending_records = [v for v in available_records if v["video_id"] not in done_vids]
     autocast_ctx = (lambda: torch.autocast(device_type="cuda", dtype=torch.float16)) if device == "cuda" else nullcontext
 
-    print("\n--- [Step 3] Streaming Video Keyframe Extraction & GPU Inference ---")
+    print(
+        f"\n--- [Step 3] Streaming Video Keyframe Extraction & GPU Inference "
+        f"(pending={len(pending_records)}, prefetch_workers={num_workers}) ---"
+    )
     t_start = time.time()
     total_videos = len(available_records)
+    total_pending = len(pending_records)
     session_frames = 0
     session_videos = 0
 
-    for v_idx, v in enumerate(available_records, start=1):
+    for idx, (v, extracted_pairs, duration_sec, num_scenes) in enumerate(
+        _iter_decoded_videos(pending_records, video_files_map, num_workers=num_workers), start=1
+    ):
         vid = v["video_id"]
-        if vid in done_vids:
-            continue
-
         title = v.get("title", v.get("video_file", vid))
         lang = str(v.get("language", "en")).strip().lower() or "en"
-        vpath = video_files_map[vid]
-        raw_kfs = v.get("keyframes") or None
-
-        extracted_pairs, duration_sec, num_scenes = extract_video_frames_in_memory(vpath, raw_kfs)
         if not extracted_pairs:
+            print(f"    [Warning] Skipped {vid} (no frames decoded).")
             continue
 
         images = [p[1] for p in extracted_pairs]
@@ -497,11 +583,11 @@ def run_streaming_encoding(
         session_frames += len(extracted_pairs)
         session_videos += 1
 
-        if session_videos % 10 == 0 or v_idx == total_videos:
+        if session_videos % 10 == 0 or idx == total_pending:
             elapsed = time.time() - t_start
             fps = session_frames / max(elapsed, 0.001)
-            remaining = max(0, total_videos - len(processed_records))
-            eta_sec = remaining * (elapsed / max(session_videos, 1))
+            remaining = max(0, total_pending - idx)
+            eta_sec = remaining * (elapsed / max(idx, 1))
             print(
                 f"[{len(processed_records):3d}/{total_videos}] Total frames: {len(all_metadata):,} | "
                 f"Speed: {fps:.1f} fps | ETA: {eta_sec/60:.1f} min"
@@ -733,6 +819,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("/content/output"), help="Output dir (set to Google Drive path for persistence)")
     parser.add_argument("--manifest", type=Path, default=Path("/content/newsseek_manifest.json"), help="Optional pre-built manifest path")
     parser.add_argument("--batch-size", type=int, default=128, help="GPU inference batch size (128 for T4/L4, 256 for A100)")
+    parser.add_argument("--num-workers", type=int, default=4, help="Parallel CPU workers prefetching video decoding (0/1 = sequential)")
     parser.add_argument("--max-videos", type=int, default=0, help="Limit number of videos (0 = all 698 videos)")
     parser.add_argument("--checkpoint-every", type=int, default=50, help="Save checkpoint every N videos (0 = disable)")
     parser.add_argument("--no-resume", action="store_true", help="Ignore existing checkpoint and start fresh")
@@ -765,6 +852,7 @@ def main() -> None:
         max_videos=args.max_videos,
         checkpoint_every=args.checkpoint_every,
         resume=not args.no_resume,
+        num_workers=args.num_workers,
     )
     build_and_package_stores(
         output_dir=args.output_dir,

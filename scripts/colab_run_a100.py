@@ -109,6 +109,7 @@ def keyframe_count_tiered(duration_s: float) -> int:
 
 
 def detect_scenes_fast(cap, fps: float, num_frames: int, threshold: float = 0.35):
+    """Detects shot boundaries sequentially via cap.grab() to avoid expensive FFmpeg random seeks."""
     if num_frames <= 0:
         return [(0, 0)]
     step = max(1, int(fps * 0.25))
@@ -117,26 +118,31 @@ def detect_scenes_fast(cap, fps: float, num_frames: int, threshold: float = 0.35
     max_frames = int(25.0 * fps)
     scenes = []
 
-    for f_idx in range(0, num_frames, step):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-        ret, frame = cap.read()
-        if not ret or frame is None:
+    f_idx = 0
+    while f_idx < num_frames:
+        if not cap.grab():
             break
-        small = cv2.resize(frame, (120, 68), interpolation=cv2.INTER_NEAREST)
-        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-        hist = cv2.calcHist([hsv], [0, 1], None, [24, 24], [0, 180, 0, 256])
-        cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+        if f_idx % step == 0:
+            ret, frame = cap.retrieve()
+            if not ret or frame is None:
+                break
+            small = cv2.resize(frame, (120, 68), interpolation=cv2.INTER_NEAREST)
+            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            hist = cv2.calcHist([hsv], [0, 1], None, [24, 24], [0, 180, 0, 256])
+            cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
 
-        if prev_hist is not None:
-            diff = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_BHATTACHARYYA)
-            if diff > threshold or (f_idx - scene_start) >= max_frames:
-                scenes.append((scene_start, f_idx - 1))
-                scene_start = f_idx
-        prev_hist = hist
+            if prev_hist is not None:
+                diff = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_BHATTACHARYYA)
+                if diff > threshold or (f_idx - scene_start) >= max_frames:
+                    scenes.append((scene_start, f_idx - 1))
+                    scene_start = f_idx
+            prev_hist = hist
+        f_idx += 1
 
-    if scene_start < num_frames:
-        scenes.append((scene_start, num_frames - 1))
-    return scenes if scenes else [(0, num_frames - 1)]
+    end_limit = f_idx if f_idx > 0 else num_frames
+    if scene_start < end_limit:
+        scenes.append((scene_start, end_limit - 1))
+    return scenes if scenes else [(0, max(0, end_limit - 1))]
 
 
 def select_keyframes(scenes, fps):
